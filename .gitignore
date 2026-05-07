@@ -1,0 +1,36 @@
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+ENV/
+.env.*
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python Notebooks
+.ipynb_checkpoints/
+
+# Model files
+*.pt
+
+# Build
+/dist/
+/build/
+
+# Misc
+*.bak
+*.tmp

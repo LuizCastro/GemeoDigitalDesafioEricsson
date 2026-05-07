@@ -1,0 +1,12 @@
+{
+  "id_alerta": "ALRT-TEST-001",
+  "timestamp": "2026-05-06T19:40:00Z",
+  "evento": "fogo",
+  "confianca": 0.94,
+  "localizacao_otimizada": {
+    "x": 350,
+    "y": 120,
+    "setor": "Setor D - Caldeiras Químicas"
+  },
+  "llm_prompt": "TESTE: Fogo detectado no Setor D - Caldeiras Químicas."
+}

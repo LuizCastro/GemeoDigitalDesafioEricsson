@@ -1,0 +1,14 @@
+# edge/requirements.txt
+# Dependências Python para a camada de inferência (Squad 1 + Squad 2)
+#
+# Instalação:
+#   pip install -r edge/requirements.txt
+#
+# Notas:
+# - torch: CPU por padrão. Para GPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# - ultralytics: inclui YOLOv8 e YOLOv12 (requer ultralytics>=8.3)
+
+ultralytics>=8.3.0
+opencv-python>=4.6.0
+requests>=2.28.0
+numpy>=1.23.0
