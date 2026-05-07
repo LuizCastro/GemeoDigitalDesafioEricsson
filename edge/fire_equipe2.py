@@ -1,12 +1,21 @@
 import cv2
 import requests
 import time
+import os
 from datetime import datetime
 from ultralytics import YOLO
 
 # --- CONFIGURAÇÕES E CONTRATO DE DADOS ---
 # [cite: 10, 40]
 API_URL = "http://localhost:3000/alerta"  # URL da API do Squad 3
+AUTH_TOKEN = os.getenv(
+    "EDGE_AUTH_TOKEN",
+    os.getenv("AUTH_TOKEN", "GEMEO_DIGITAL_5G_ERICSSON_2026_9f3a27c1")
+)
+REQUEST_HEADERS = {
+    "Authorization": f"Bearer {AUTH_TOKEN}",
+    "Content-Type": "application/json",
+}
 
 # [cite: 42]
 # Modelo treinado pelo Squad 1 (notebook: smoke-fire-detection-yolo-v12)
@@ -109,10 +118,10 @@ def start_inference():
                 "llm_prompt": f"Patrulha de rotina no {loc['setor']}. Leituras térmicas normais."
             }
             try:
-                requests.post(API_URL, json=payload_normal, timeout=0.5)
+                requests.post(API_URL, json=payload_normal, headers=REQUEST_HEADERS, timeout=0.5)
                 print(f"🔵 Heartbeat: {loc['setor']}")
-            except Exception:
-                pass  # Backend offline — continua a inferência sem bloquear
+            except Exception as e:
+                print(f"Erro ao enviar heartbeat: {e}")
             patrol_idx     = (patrol_idx + 1) % len(PATROL_PATH)
             last_heartbeat = now
 
@@ -132,7 +141,7 @@ def start_inference():
 
             # Dispara o alerta para o Backend da Squad 3 [cite: 46]
             try:
-                response = requests.post(API_URL, json=payload, timeout=0.5)
+                response = requests.post(API_URL, json=payload, headers=REQUEST_HEADERS, timeout=0.5)
                 print(f"🚨 Alerta enviado! Status: {response.status_code}")
             except Exception as e:
                 print(f"Erro ao conectar com Squad 3: {e}")

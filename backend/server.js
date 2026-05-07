@@ -11,6 +11,7 @@ const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
 const cors = require('cors');
+const { spawn } = require('child_process');
 
 // ── Portas ──
 const HTTP_PORT = 3000;
@@ -21,7 +22,20 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+// ── Middleware de autorização por token fixo ──
+const AUTH_TOKEN = process.env.AUTH_TOKEN || 'GEMEO_DIGITAL_5G_ERICSSON_2026_9f3a27c1';
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || authHeader !== `Bearer ${AUTH_TOKEN}`) {
+    return res.status(401).json({ error: 'Não autorizado. Token inválido.' });
+  }
+  next();
+}
+
 // ── WebSocket Server ──
+
+// Variável global para controlar o processo do monitoramento de fogo
+let fireProcess = null;
 const wsServer = http.createServer();
 const wss = new WebSocket.Server({ server: wsServer });
 
@@ -29,7 +43,7 @@ let clientCount = 0;
 wss.on('connection', (ws) => {
   clientCount++;
   console.log(`🟢 Cliente conectado (total: ${clientCount})`);
-  
+
   // Envia estado inicial ao novo cliente
   ws.send(JSON.stringify({
     type: 'connection',
@@ -55,7 +69,7 @@ function broadcast(payload) {
 // ── Validação simples do payload ──
 function validatePayload(body) {
   const errors = [];
-  
+
   if (!body.timestamp) errors.push('Campo "timestamp" obrigatório');
   if (!body.evento) errors.push('Campo "evento" obrigatório');
   if (!['fogo', 'fumaca', 'normal'].includes(body.evento)) {
@@ -67,7 +81,7 @@ function validatePayload(body) {
   if (!body.localizacao_otimizada || typeof body.localizacao_otimizada !== 'object') {
     errors.push('Campo "localizacao_otimizada" obrigatório (objeto com x, y, setor)');
   }
-  
+
   return errors;
 }
 
@@ -77,18 +91,18 @@ function generateLLMReport(payload) {
   const severity = payload.evento === 'fogo' ? 'CRÍTICO' : 'ATENÇÃO';
   const setor = payload.localizacao_otimizada?.setor || 'Desconhecido';
   const conf = (payload.confianca * 100).toFixed(1);
-  
+
   if (payload.evento === 'normal') {
     return `[RELATÓRIO AUTOMÁTICO] Patrulha de rotina no setor "${setor}". ` +
-           `Leituras térmicas normais. Nenhuma anomalia detectada pelo sistema de IA.`;
+      `Leituras térmicas normais. Nenhuma anomalia detectada pelo sistema de IA.`;
   }
-  
+
   return `[${severity}] Princípio de ${payload.evento.toUpperCase()} detectado ` +
-         `no setor "${setor}" às ${new Date(payload.timestamp).toLocaleTimeString('pt-BR')}. ` +
-         `Confiança da IA: ${conf}%. ` +
-         `Recomendação: Acionar protocolo de evacuação e brigada de incêndio imediatamente. ` +
-         `Coordenadas do AMR: (${payload.localizacao_otimizada?.x?.toFixed(1)}, ` +
-         `${payload.localizacao_otimizada?.y?.toFixed(1)}).`;
+    `no setor "${setor}" às ${new Date(payload.timestamp).toLocaleTimeString('pt-BR')}. ` +
+    `Confiança da IA: ${conf}%. ` +
+    `Recomendação: Acionar protocolo de evacuação e brigada de incêndio imediatamente. ` +
+    `Coordenadas do AMR: (${payload.localizacao_otimizada?.x?.toFixed(1)}, ` +
+    `${payload.localizacao_otimizada?.y?.toFixed(1)}).`;
 }
 
 // ── Histórico de alertas (em memória) ──
@@ -97,10 +111,10 @@ const MAX_HISTORY = 50;
 
 // ── Rotas HTTP ──
 
-// POST /alerta — recebe telemetria do Python
-app.post('/alerta', (req, res) => {
+// POST /alerta — recebe telemetria do Python (requer autorização)
+app.post('/alerta', authMiddleware, (req, res) => {
   const errors = validatePayload(req.body);
-  
+
   if (errors.length > 0) {
     console.warn('❌ Payload inválido:', errors);
     return res.status(400).json({ error: 'Payload inválido', details: errors });
@@ -121,10 +135,10 @@ app.post('/alerta', (req, res) => {
 
   // Broadcast para todos os clientes WebSocket
   broadcast(enriched);
-  
+
   const emoji = enriched.evento === 'fogo' ? '🔥' : enriched.evento === 'fumaca' ? '💨' : '✅';
   console.log(`${emoji} Alerta [${enriched.id_alerta}] — ${enriched.evento} (${(enriched.confianca * 100).toFixed(1)}%) — ${enriched.localizacao_otimizada?.setor}`);
-  
+
   res.json({ status: 'ok', id_alerta: enriched.id_alerta });
 });
 
@@ -141,6 +155,34 @@ app.get('/health', (req, res) => {
     alertas_total: alertHistory.length,
     uptime: process.uptime()
   });
+});
+
+// POST /start-fire-monitoring — Inicia o script de monitoramento
+app.post('/start-fire-monitoring', (req, res) => {
+  if (fireProcess) {
+    return res.status(400).json({ error: 'O monitoramento já está em execução.' });
+  }
+
+  fireProcess = spawn('python', ['edge/fire_equipe2.py'], { stdio: 'inherit' });
+
+  fireProcess.on('close', (code) => {
+    console.log(`Processo fire_equipe2.py encerrado com código ${code}`);
+    fireProcess = null;
+  });
+
+  res.json({ status: 'Monitoramento iniciado.' });
+});
+
+// POST /stop-fire-monitoring — Para o script de monitoramento
+app.post('/stop-fire-monitoring', (req, res) => {
+  if (!fireProcess) {
+    return res.status(400).json({ error: 'Nenhum monitoramento está em execução.' });
+  }
+
+  fireProcess.kill();
+  fireProcess = null;
+
+  res.json({ status: 'Monitoramento parado.' });
 });
 
 // ── Inicialização ──

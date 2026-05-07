@@ -1,0 +1,40 @@
+{
+  "info": {
+    "name": "Gêmeo Digital Backend - Teste de Alerta",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Enviar Alerta de Fogo",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer SEU_TOKEN_FIXO_AQUI"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id_alerta\": \"ALRT-TEST-001\",\n  \"timestamp\": \"2026-05-06T19:40:00Z\",\n  \"evento\": \"fogo\",\n  \"confianca\": 0.94,\n  \"localizacao_otimizada\": {\n    \"x\": 350,\n    \"y\": 120,\n    \"setor\": \"Setor D - Caldeiras Químicas\"\n  },\n  \"llm_prompt\": \"TESTE: Fogo detectado no Setor D - Caldeiras Químicas.\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/alerta",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "3000",
+          "path": [
+            "alerta"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}
