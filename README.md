@@ -60,6 +60,22 @@ npm install
 pip install -r edge/requirements.txt
 ```
 
+### Configurar Groq
+
+Defina as variáveis de ambiente antes de subir o backend:
+
+```bash
+# PowerShell
+$env:GROQ_API_KEY="sua_chave_groq"
+$env:GROQ_MODEL="llama-3.3-70b-versatile"
+
+# bash
+export GROQ_API_KEY="sua_chave_groq"
+export GROQ_MODEL="llama-3.3-70b-versatile"
+```
+
+Sem `GROQ_API_KEY`, o backend mantém um fallback local para não quebrar o dashboard.
+
 ### Baixar modelo de IA
 
 ```bash
@@ -130,7 +146,7 @@ atual do setor, permitindo que o dashboard mostre o robô em movimento mesmo sem
 - [ ] Suporte a stream RTSP da câmara do robô (trocar `VideoCapture(0)`)
 
 ### 🟡 Squad 2 — Backend
-- [ ] Substituir `generateLLMReport()` mock por chamada real a LLM (OpenAI/Ollama)
+- [x] Integrar `generateLLMReport()` com Groq via backend Node.js
 - [ ] Persistência de alertas (SQLite ou arquivo JSON) — atualmente só em memória
 - [ ] Autenticação no endpoint POST /alerta (token fixo ou API key)
 
@@ -194,6 +210,8 @@ python fire_equipe2.py
     ↓
 👷 Operador visualiza no browser
 ```
+
+O frontend também chama `POST /api/llm-report` no modo demo, para que a análise exibida no painel use o mesmo fluxo da Groq em vez de texto mockado localmente.
 
 ---
 

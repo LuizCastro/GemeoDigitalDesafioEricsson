@@ -7,6 +7,7 @@
 // Faz broadcast via WebSocket para o Dashboard React
 // ==========================================
 
+require('dotenv').config();
 const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
@@ -21,6 +22,10 @@ const WS_PORT = 3001;
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 // ── Middleware de autorização por token fixo ──
 const AUTH_TOKEN = process.env.AUTH_TOKEN || 'GEMEO_DIGITAL_5G_ERICSSON_2026_9f3a27c1';
@@ -85,9 +90,7 @@ function validatePayload(body) {
   return errors;
 }
 
-// ── Mock LLM Reporter ──
-// Substitua esta função pela chamada real à API LLM quando disponível
-function generateLLMReport(payload) {
+function generateFallbackLLMReport(payload) {
   const severity = payload.evento === 'fogo' ? 'CRÍTICO' : 'ATENÇÃO';
   const setor = payload.localizacao_otimizada?.setor || 'Desconhecido';
   const conf = (payload.confianca * 100).toFixed(1);
@@ -105,6 +108,77 @@ function generateLLMReport(payload) {
     `${payload.localizacao_otimizada?.y?.toFixed(1)}).`;
 }
 
+function buildGroqMessages(payload) {
+  const setor = payload.localizacao_otimizada?.setor || 'Desconhecido';
+  const confianca = typeof payload.confianca === 'number'
+    ? `${(payload.confianca * 100).toFixed(1)}%`
+    : 'N/A';
+
+  return [
+    {
+      role: 'system',
+      content: 'Você é um analista industrial de resposta a incidentes. Responda em português do Brasil, em no máximo 4 frases curtas, com foco em: resumo do evento, risco operacional, ação imediata e observação objetiva. Não invente sensores ou dados ausentes.'
+    },
+    {
+      role: 'user',
+      content:
+        `Gere um relatório operacional para o dashboard com base nesta telemetria:\n` +
+        `- Timestamp: ${payload.timestamp}\n` +
+        `- Evento: ${payload.evento}\n` +
+        `- Confiança: ${confianca}\n` +
+        `- Setor: ${setor}\n` +
+        `- Coordenadas 2D: x=${payload.localizacao_otimizada?.x ?? 'N/A'}, y=${payload.localizacao_otimizada?.y ?? 'N/A'}\n` +
+        `- ID do alerta: ${payload.id_alerta || 'N/A'}\n` +
+        `Se o evento for normal, descreva a patrulha sem alarmismo. Se for fogo ou fumaça, priorize contenção e segurança.`
+    }
+  ];
+}
+
+async function generateLLMReport(payload) {
+  if (!GROQ_API_KEY) {
+    return generateFallbackLLMReport(payload);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const response = await fetch(GROQ_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.2,
+        max_tokens: 180,
+        messages: buildGroqMessages(payload),
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Groq HTTP ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content?.trim();
+
+    if (!content) {
+      throw new Error('Resposta da Groq sem conteúdo');
+    }
+
+    return content;
+  } catch (error) {
+    console.warn('Falha ao consultar a Groq, usando fallback local:', error.message);
+    return generateFallbackLLMReport(payload);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // ── Histórico de alertas (em memória) ──
 const alertHistory = [];
 const MAX_HISTORY = 50;
@@ -112,7 +186,7 @@ const MAX_HISTORY = 50;
 // ── Rotas HTTP ──
 
 // POST /alerta — recebe telemetria do Python (requer autorização)
-app.post('/alerta', authMiddleware, (req, res) => {
+app.post('/alerta', authMiddleware, async (req, res) => {
   const errors = validatePayload(req.body);
 
   if (errors.length > 0) {
@@ -121,11 +195,12 @@ app.post('/alerta', authMiddleware, (req, res) => {
   }
 
   // Enriquece o payload
+  const llmReport = await generateLLMReport(req.body);
   const enriched = {
     ...req.body,
     id_alerta: req.body.id_alerta || `ALRT-${Date.now().toString(36).toUpperCase()}`,
     server_timestamp: new Date().toISOString(),
-    llm_report: generateLLMReport(req.body),
+    llm_report: llmReport,
     type: 'alerta'
   };
 
@@ -140,6 +215,22 @@ app.post('/alerta', authMiddleware, (req, res) => {
   console.log(`${emoji} Alerta [${enriched.id_alerta}] — ${enriched.evento} (${(enriched.confianca * 100).toFixed(1)}%) — ${enriched.localizacao_otimizada?.setor}`);
 
   res.json({ status: 'ok', id_alerta: enriched.id_alerta });
+});
+
+app.post('/api/llm-report', async (req, res) => {
+  const errors = validatePayload(req.body);
+
+  if (errors.length > 0) {
+    return res.status(400).json({ error: 'Payload inválido', details: errors });
+  }
+
+  try {
+    const llm_report = await generateLLMReport(req.body);
+    res.json({ llm_report, provider: GROQ_API_KEY ? 'groq' : 'fallback' });
+  } catch (error) {
+    console.error('Erro ao gerar relatório LLM:', error);
+    res.status(500).json({ error: 'Falha ao gerar relatório LLM.' });
+  }
 });
 
 // GET /alertas — retorna histórico (para debug / UI)

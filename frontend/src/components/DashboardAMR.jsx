@@ -4,6 +4,77 @@ import { OrbitControls, useGLTF, Html, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import './DashboardAMR.css';
 
+// Ícones para tipos de evento
+const EVENT_ICONS = {
+  fogo: '🔥',
+  fumaca: '💨',
+  normal: '✅',
+};
+const ALERT_EVENTS = new Set(['fogo', 'fumaca']);
+
+function getOperatorDecisionLabel(decision) {
+  if (decision === 'confirmed') return 'Reconhecido';
+  if (decision === 'dismissed') return 'Nao incidente';
+  return 'Pendente';
+}
+
+function getOperatorDecisionClass(decision) {
+  if (decision === 'confirmed') return 'operator-confirmed';
+  if (decision === 'dismissed') return 'operator-dismissed';
+  return 'operator-pending';
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleTimeString('pt-BR');
+  } catch {
+    return ts;
+  }
+}
+
+// Componente de log de alertas
+function AlertLogPanel({ alertLog, onSelect, selectedId, className = '' }) {
+  const visibleAlerts = alertLog.filter((alert) => ALERT_EVENTS.has(alert.evento));
+
+  return (
+    <section className={`panel alert-log-panel ${className}`.trim()}>
+      <div className="panel-header">
+        <h2 className="panel-title">Histórico de Alertas</h2>
+      </div>
+      <div className="alert-log-list">
+        {visibleAlerts.length === 0 && <p className="status-label">Nenhum alerta crítico recebido.</p>}
+        {visibleAlerts.map((alert, idx) => {
+          const icon = EVENT_ICONS[alert.evento] || '❓';
+          const isSelected = alert.id_alerta === selectedId;
+          const llmText = alert.llm_report || alert.llm_prompt;
+          return (
+            <div
+              key={alert.id_alerta + idx}
+              className={`alert-log-item${isSelected ? ' selected' : ''} alert-type-${alert.evento}`}
+              onClick={() => onSelect(alert)}
+              tabIndex={0}
+              title={alert.llm_report || alert.llm_prompt || ''}
+            >
+              <span className="alert-log-icon">{icon}</span>
+              <span className="alert-log-main">
+                <span className="alert-log-time">{formatTime(alert.timestamp)}</span>
+                <span className="alert-log-type">{alert.evento?.toUpperCase()}</span>
+                <span className="alert-log-setor">{alert.localizacao_otimizada?.zone || alert.localizacao_otimizada?.setor}</span>
+                <span className={`alert-log-decision ${getOperatorDecisionClass(alert.operatorDecision)}`}>
+                  Operador: {getOperatorDecisionLabel(alert.operatorDecision)}
+                </span>
+                <span className="alert-log-llm">LLM: {llmText || 'LLM aguardando retorno.'}</span>
+              </span>
+              <span className="alert-log-conf">{(alert.confianca * 100).toFixed(0)}%</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 const API_BASE_URL = '/api';
 const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/`;
@@ -298,13 +369,21 @@ const DEFAULT_3D = { x3d: 0, y3d: 0.5, z3d: 0 };
 // 4. COMPONENTE PRINCIPAL
 // ==========================================
 export default function DigitalTwinDashboard() {
+  // Log de alertas
+  const [alertLog, setAlertLog] = useState([]);
+  const [selectedAlert, setSelectedAlert] = useState(null);
+  const [wsStatus, setWsStatus] = useState('connecting'); // 'connecting' | 'online' | 'offline'
+  const [backendStatus, setBackendStatus] = useState('checking');
+  const [newAlertAnim, setNewAlertAnim] = useState(false);
   const [systemState, setSystemState] = useState('NORMAL');
   const [isRobotStopped, setIsRobotStopped] = useState(false);
+  const [incidentRequiresAck, setIncidentRequiresAck] = useState(false);
   const [stoppedLocation, setStoppedLocation] = useState(null);
   const [is3DMode, setIs3DMode] = useState(true);
   const [dataSource, setDataSource] = useState('mock'); // 'mock' | 'live'
   const liveTelemetryTimerRef = useRef(null);
   const currentRobotPositionRef = useRef(null);
+  const llmRequestRef = useRef(0);
   // Consistência entre posição física do robô e localização declarada pela LLM
   // 0..1 onde 1 = totalmente consistente, < 0.6 = contradição
   const [locationConsistency, setLocationConsistency] = useState(null);
@@ -317,7 +396,88 @@ export default function DigitalTwinDashboard() {
     llm_prompt: 'Sistema em patrulha. Operação normal.'
   });
 
+  const updateAlertLogEntry = (alertId, updater) => {
+    if (!alertId || alertId === 'N/A') return;
+
+    setAlertLog((prev) => prev.map((alert) => (
+      alert.id_alerta === alertId ? updater(alert) : alert
+    )));
+    setSelectedAlert((current) => {
+      if (!current || current.id_alerta !== alertId) return current;
+      return updater(current);
+    });
+  };
+
+  const requestLLMReport = async (payload) => {
+    const requestId = ++llmRequestRef.current;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/llm-report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (requestId !== llmRequestRef.current) return;
+
+      updateAlertLogEntry(payload.id_alerta, (alert) => ({
+        ...alert,
+        llm_report: data.llm_report || alert.llm_report,
+        llm_prompt: data.llm_report || alert.llm_prompt,
+      }));
+
+      setTelemetry((current) => (
+        ALERT_EVENTS.has(current.evento)
+          ? {
+            ...current,
+            llm_prompt: data.llm_report || current.llm_prompt,
+          }
+          : current
+      ));
+    } catch (error) {
+      console.warn('Erro ao buscar análise LLM:', error);
+    }
+  };
+
   // ── WebSocket: tenta conectar ao server.js ──
+  // Checa status do backend periodicamente
+  useEffect(() => {
+    let timer;
+    async function checkBackend() {
+      try {
+        const res = await fetch(`${API_BASE_URL}/health`);
+        if (res.ok) setBackendStatus('online');
+        else setBackendStatus('offline');
+      } catch {
+        setBackendStatus('offline');
+      }
+      timer = setTimeout(checkBackend, 10000);
+    }
+    checkBackend();
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Carrega histórico inicial
+  useEffect(() => {
+    async function fetchLog() {
+      try {
+        const res = await fetch(`${API_BASE_URL}/alertas`);
+        if (res.ok) {
+          const data = await res.json();
+          setAlertLog(Array.isArray(data) ? data.filter((alert) => ALERT_EVENTS.has(alert.evento)) : []);
+        }
+      } catch { }
+    }
+    fetchLog();
+  }, []);
+
   useEffect(() => {
     let ws;
     let reconnectTimer;
@@ -334,6 +494,7 @@ export default function DigitalTwinDashboard() {
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
+          setWsStatus('online');
           console.log('🟢 WebSocket conectado ao server.js');
         };
 
@@ -343,13 +504,13 @@ export default function DigitalTwinDashboard() {
             if (data.type === 'connection') return; // mensagem de boas-vindas
 
             setDataSource('live');
+            setWsStatus('online');
             scheduleLiveTimeout();
 
             // Mapeia setor → coordenadas 3D
             const setor = data.localizacao_otimizada?.setor || '';
             const pos3d = SECTOR_TO_3D[setor] || DEFAULT_3D;
-
-            setTelemetry({
+            const nextTelemetry = {
               id_alerta: data.id_alerta || 'N/A',
               timestamp: data.timestamp,
               evento: data.evento,
@@ -359,12 +520,45 @@ export default function DigitalTwinDashboard() {
                 zone: setor,
                 ...pos3d,
               },
-              llm_prompt: data.llm_report || data.llm_prompt || ''
+              llm_prompt: ALERT_EVENTS.has(data.evento)
+                ? (data.llm_report || data.llm_prompt || 'Gerando análise automatizada...')
+                : '',
+              operatorDecision: 'pending'
+            };
+
+            const hasIncomingIncident = ALERT_EVENTS.has(data.evento);
+            const shouldHoldCurrentIncident = incidentRequiresAck && !hasIncomingIncident;
+
+            if (!shouldHoldCurrentIncident) {
+              setTelemetry(nextTelemetry);
+            }
+            setAlertLog((prev) => {
+              if (!ALERT_EVENTS.has(nextTelemetry.evento)) return prev;
+              // Evita duplicatas por id_alerta
+              if (prev.length > 0 && prev[0].id_alerta === nextTelemetry.id_alerta) return prev;
+              // Animação de novo alerta
+              setNewAlertAnim(true);
+              setTimeout(() => setNewAlertAnim(false), 1200);
+              return [nextTelemetry, ...prev].slice(0, 50);
             });
+            if (ALERT_EVENTS.has(data.evento) && !data.llm_report && !data.llm_prompt) {
+              requestLLMReport({
+                id_alerta: nextTelemetry.id_alerta,
+                timestamp: nextTelemetry.timestamp,
+                evento: nextTelemetry.evento,
+                confianca: nextTelemetry.confianca,
+                localizacao_otimizada: {
+                  x: data.localizacao_otimizada?.x,
+                  y: data.localizacao_otimizada?.y,
+                  setor,
+                },
+              });
+            }
             // Só entra em ALERT e para o robô se não estiver em modo patrulha
-            if (data.evento !== 'normal' && !isRobotStopped) {
+            if (hasIncomingIncident) {
               setSystemState('ALERT');
               setIsRobotStopped(true);
+              setIncidentRequiresAck(true);
               if (currentRobotPositionRef.current) {
                 setStoppedLocation({
                   ...data.localizacao_otimizada,
@@ -374,7 +568,7 @@ export default function DigitalTwinDashboard() {
                   z3d: currentRobotPositionRef.current.z,
                 });
               }
-            } else if (data.evento === 'normal') {
+            } else if (data.evento === 'normal' && !incidentRequiresAck) {
               setSystemState('NORMAL');
             }
           } catch (e) {
@@ -383,12 +577,14 @@ export default function DigitalTwinDashboard() {
         };
 
         ws.onclose = () => {
+          setWsStatus('offline');
           console.log('🔴 WebSocket desconectado — fallback para mock');
           setDataSource('mock');
           reconnectTimer = setTimeout(connect, 5000);
         };
 
         ws.onerror = () => {
+          setWsStatus('offline');
           ws.close();
         };
       } catch (e) {
@@ -403,7 +599,7 @@ export default function DigitalTwinDashboard() {
       clearTimeout(liveTelemetryTimerRef.current);
       if (ws) ws.close();
     };
-  }, [isRobotStopped]);
+  }, [incidentRequiresAck]);
 
   // ── Mock fallback: só roda se não houver WebSocket ──
   useEffect(() => {
@@ -417,24 +613,93 @@ export default function DigitalTwinDashboard() {
       const isFire = currentPos.zone === 'Setor D - Caldeiras Químicas';
       const newEvent = isFire ? 'fogo' : 'normal';
       const newConfianca = isFire ? 0.96 : 0.0;
-
-      setTelemetry({
+      const nextPayload = {
         id_alerta: isFire ? `ALRT-${Math.floor(Math.random() * 1000)}` : 'N/A',
         timestamp: new Date().toISOString(),
         evento: newEvent,
         confianca: newConfianca,
-        localizacao_otimizada: currentPos,
-        llm_prompt: isFire
-          ? `[URGENTE] Princípio de ${newEvent.toUpperCase()} detetado na usina térmica (${currentPos.zone}). Confiança da IA: ${(newConfianca * 100).toFixed(0)}%. Protocolo de evacuação recomendado.`
-          : `Patrulha de rotina no ${currentPos.zone}. Leituras térmicas normais.`
-      });
-      setSystemState(isFire ? 'ALERT' : 'NORMAL');
+        localizacao_otimizada: {
+          x: currentPos.x,
+          y: currentPos.y,
+          setor: currentPos.zone,
+        },
+      };
+
+      const shouldHoldCurrentIncident = incidentRequiresAck && !ALERT_EVENTS.has(nextPayload.evento);
+
+      if (!shouldHoldCurrentIncident) {
+        setTelemetry({
+          id_alerta: nextPayload.id_alerta,
+          timestamp: nextPayload.timestamp,
+          evento: nextPayload.evento,
+          confianca: nextPayload.confianca,
+          localizacao_otimizada: currentPos,
+          llm_prompt: ALERT_EVENTS.has(nextPayload.evento) ? 'Gerando análise automatizada...' : '',
+          operatorDecision: 'pending'
+        });
+      }
+      if (ALERT_EVENTS.has(nextPayload.evento)) {
+        setAlertLog((prev) => [
+          {
+            ...nextPayload,
+            localizacao_otimizada: {
+              ...nextPayload.localizacao_otimizada,
+              zone: nextPayload.localizacao_otimizada.setor,
+            },
+            llm_prompt: 'Gerando análise automatizada...',
+            operatorDecision: 'pending'
+          },
+          ...prev
+        ].slice(0, 50));
+        setIncidentRequiresAck(true);
+        setIsRobotStopped(true);
+        setStoppedLocation({
+          ...currentPos,
+          zone: currentPos.zone,
+          x3d: currentPos.x3d,
+          y3d: currentPos.y3d,
+          z3d: currentPos.z3d,
+        });
+      }
+      if (isFire) {
+        setSystemState('ALERT');
+      } else if (!incidentRequiresAck) {
+        setSystemState('NORMAL');
+      }
+      if (ALERT_EVENTS.has(nextPayload.evento)) {
+        setNewAlertAnim(true);
+        setTimeout(() => setNewAlertAnim(false), 1200);
+      }
+      if (ALERT_EVENTS.has(nextPayload.evento)) {
+        requestLLMReport(nextPayload);
+      }
     }, 4000);
 
     return () => clearInterval(telemetryInterval);
-  }, [dataSource]);
+  }, [dataSource, incidentRequiresAck]);
+
+  // Destaca alerta selecionado no 3D
+  useEffect(() => {
+    if (!selectedAlert) return;
+    // Atualiza posição do robô para o alerta selecionado
+    setTelemetry((prev) => ({
+      ...prev,
+      ...selectedAlert,
+      localizacao_otimizada: {
+        ...selectedAlert.localizacao_otimizada,
+        zone: selectedAlert.localizacao_otimizada?.zone || selectedAlert.localizacao_otimizada?.setor,
+      },
+    }));
+    // Se o alerta for de fogo/fumaça, entra em ALERT
+    if (selectedAlert.evento === 'fogo' || selectedAlert.evento === 'fumaca') {
+      setSystemState('ALERT');
+      setIsRobotStopped(true);
+      setIncidentRequiresAck(true);
+    }
+  }, [selectedAlert]);
 
   const isAlert = systemState === 'ALERT';
+  const hasIncident = ALERT_EVENTS.has(telemetry.evento);
   const statusLabel = isRobotStopped ? 'PARADO' : isAlert ? 'ALERTA' : 'NORMAL';
   // Quando parado, congelar posição do robô em stoppedLocation
   const displayedLocation = isRobotStopped && stoppedLocation
@@ -443,6 +708,11 @@ export default function DigitalTwinDashboard() {
   const { x3d, y3d, z3d } = displayedLocation;
 
   const startPatrol = async () => {
+    if (incidentRequiresAck) {
+      alert('Reconheca o incidente antes de retomar a patrulha.');
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/start-fire-monitoring`, {
         method: 'POST',
@@ -485,15 +755,37 @@ export default function DigitalTwinDashboard() {
     }
   };
 
-  const handleAlert = () => {
+  const handleAcknowledgeIncident = () => {
     setIsRobotStopped(true);
+    setIncidentRequiresAck(false);
+    updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
+      ...alert,
+      operatorDecision: 'confirmed',
+    }));
     setStoppedLocation(currentRobotPositionRef.current ? {
       ...telemetry.localizacao_otimizada,
       x3d: currentRobotPositionRef.current.x,
       y3d: currentRobotPositionRef.current.y,
       z3d: currentRobotPositionRef.current.z,
     } : telemetry.localizacao_otimizada);
-    alert('Alerta recebido! Robô parado no local.');
+    setSystemState(ALERT_EVENTS.has(telemetry.evento) ? 'ALERT' : 'NORMAL');
+    alert('Incidente reconhecido. O robô permanece parado até nova liberação.');
+  };
+
+  const handleDismissIncident = () => {
+    setIncidentRequiresAck(false);
+    setSystemState('NORMAL');
+    updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
+      ...alert,
+      operatorDecision: 'dismissed',
+    }));
+    setTelemetry((current) => ({
+      ...current,
+      evento: 'normal',
+      confianca: 0,
+      llm_prompt: '',
+    }));
+    alert('Ocorrência descartada. Use Iniciar Patrulha para retomar a operação.');
   };
 
 
@@ -524,11 +816,15 @@ export default function DigitalTwinDashboard() {
   };
 
   return (
-    <div className="dashboard-container">
+    <div className={`dashboard-container${newAlertAnim ? ' new-alert-anim' : ''}`}>
       <header className={`dashboard-header ${isAlert ? 'alert' : ''}`}>
         <div>
           <h1 className="header-title">GEMEO DIGITAL <span>| COMMAND CENTER</span></h1>
-          <p className="header-subtitle">{dataSource === 'live' ? 'LIVE DATA' : 'DEMO MODE'} | {telemetry.localizacao_otimizada?.zone || telemetry.localizacao_otimizada?.setor || 'Sem setor'}</p>
+          <p className="header-subtitle">
+            {dataSource === 'live' ? 'LIVE DATA' : 'DEMO MODE'} | {telemetry.localizacao_otimizada?.zone || telemetry.localizacao_otimizada?.setor || 'Sem setor'}
+            <span className={`status-dot ws-${wsStatus}`} title={`WebSocket: ${wsStatus}`}></span>
+            <span className={`status-dot backend-${backendStatus}`} title={`Backend: ${backendStatus}`}></span>
+          </p>
         </div>
         <div className="header-controls">
           <button onClick={() => setIs3DMode((value) => !value)} className={`btn-3d ${is3DMode ? 'active' : ''}`}>
@@ -544,13 +840,37 @@ export default function DigitalTwinDashboard() {
       </header>
 
       <main className="dashboard-grid">
-        <section className={`panel ${isAlert ? 'alert' : ''}`} style={{ minHeight: '72vh' }}>
+        <section className={`panel panel-video ${isAlert ? 'alert' : ''}`}>
+          <div className="panel-header">
+            <h2 className="panel-title">Feed da Camera</h2>
+            <span className="status-label">AMR CAM 01</span>
+          </div>
+
+          <div className="video-frame panel-video-frame">
+            <div className={`video-bg ${isAlert ? 'alert' : 'normal'}`} />
+            {isAlert && (
+              <div className="bounding-box">
+                <div className="bb-label">
+                  {telemetry.evento?.toUpperCase()} {(telemetry.confianca * 100).toFixed(0)}%
+                </div>
+              </div>
+            )}
+            <div className="video-overlay-content">
+              <p className="status-value panel-video-title">AMR CAM 01</p>
+              <p className="status-label panel-video-subtitle">
+                {isAlert ? 'Deteccao ativa na area monitorada' : 'Patrulha visual em andamento'}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className={`panel panel-scene ${isAlert ? 'alert' : ''}`}>
           <div className="panel-header">
             <h2 className="panel-title">Digital Twin 3D</h2>
             <span className="status-label">{telemetry.id_alerta}</span>
           </div>
 
-          <div className="map-container" style={{ minHeight: '60vh' }}>
+          <div className="map-container scene-map-container">
             <Canvas
               shadows={false}
               dpr={[1, 1.5]}
@@ -596,35 +916,8 @@ export default function DigitalTwinDashboard() {
               />
             </Canvas>
           </div>
-        </section>
 
-        <section className={`panel ${isAlert ? 'alert' : ''}`}>
-          <div className="panel-header">
-            <h2 className="panel-title">Telemetria</h2>
-            <span className="status-label">{new Date(telemetry.timestamp).toLocaleTimeString('pt-BR')}</span>
-          </div>
-
-          <div style={{ display: 'grid', gap: '1rem' }}>
-            <div>
-              <p className="status-label">Feed da Camera</p>
-              <div className="video-frame">
-                <div className={`video-bg ${isAlert ? 'alert' : 'normal'}`} />
-                {isAlert && (
-                  <div className="bounding-box">
-                    <div className="bb-label">
-                      {telemetry.evento?.toUpperCase()} {(telemetry.confianca * 100).toFixed(0)}%
-                    </div>
-                  </div>
-                )}
-                <div style={{ position: 'relative', zIndex: 11, textAlign: 'center' }}>
-                  <p className="status-value" style={{ marginBottom: '0.25rem' }}>AMR CAM 01</p>
-                  <p className="status-label" style={{ color: '#e2e8f0' }}>
-                    {isAlert ? 'Deteccao ativa na area monitorada' : 'Patrulha visual em andamento'}
-                  </p>
-                </div>
-              </div>
-            </div>
-
+          <div className="scene-telemetry-grid">
             <div>
               <p className="status-label">Evento</p>
               <p className={`status-value ${isAlert ? 'alert' : ''}`}>{telemetry.evento?.toUpperCase() || 'NORMAL'}</p>
@@ -646,17 +939,56 @@ export default function DigitalTwinDashboard() {
                 {locationConsistency === null ? 'Calculando...' : `${(locationConsistency * 100).toFixed(1)}%`}
               </p>
             </div>
+          </div>
+        </section>
 
+        <section className={`panel panel-llm ${isAlert ? 'alert' : ''}`}>
+          <div className="panel-header">
+            <h2 className="panel-title">Analise Automatizada</h2>
+            <span className="status-label">{hasIncident ? 'INCIDENTE' : 'STANDBY'}</span>
+          </div>
+
+          <div className="llm-panel-content">
             <div>
-              <p className="status-label">Analise automatica</p>
-              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '0.5rem', padding: '1rem', lineHeight: 1.5 }}>
-                {telemetry.llm_prompt || 'Sem relatorio disponivel.'}
+              <p className="status-label">Resumo</p>
+              <div className="llm-report-box">
+                {hasIncident
+                  ? (telemetry.llm_prompt || 'Gerando analise do incidente...')
+                  : 'A analise da LLM aparece aqui quando fogo ou fumaca forem detectados.'}
               </div>
             </div>
 
-            <button onClick={handleAlert} className="btn-action">Confirmar Alerta e Parar Robo</button>
+            <div className="llm-panel-meta">
+              <div>
+                <p className="status-label">Evento Ativo</p>
+                <p className={`status-value ${isAlert ? 'alert' : ''}`}>{telemetry.evento?.toUpperCase() || 'NORMAL'}</p>
+              </div>
+
+              <div>
+                <p className="status-label">Liberação do Operador</p>
+                <p className={`status-value ${incidentRequiresAck ? 'alert' : ''}`}>
+                  {incidentRequiresAck ? 'PENDENTE' : 'LIBERADO'}
+                </p>
+              </div>
+            </div>
+
+            <div className="llm-panel-actions">
+              <button onClick={handleAcknowledgeIncident} className="btn-action" disabled={!incidentRequiresAck}>
+                {incidentRequiresAck ? 'Reconhecer Incidente' : 'Incidente Reconhecido'}
+              </button>
+              <button onClick={handleDismissIncident} className="btn-secondary" disabled={!incidentRequiresAck}>
+                {incidentRequiresAck ? 'Nao E Incidente' : 'Ocorrencia Encerrada'}
+              </button>
+            </div>
           </div>
         </section>
+
+        <AlertLogPanel
+          alertLog={alertLog}
+          onSelect={setSelectedAlert}
+          selectedId={selectedAlert?.id_alerta}
+          className="panel-history"
+        />
       </main>
     </div>
   );
