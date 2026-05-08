@@ -136,6 +136,10 @@ function buildGroqMessages(payload) {
 }
 
 async function generateLLMReport(payload) {
+  if (payload.evento === 'normal') {
+    return generateFallbackLLMReport(payload);
+  }
+
   if (!GROQ_API_KEY) {
     return generateFallbackLLMReport(payload);
   }
