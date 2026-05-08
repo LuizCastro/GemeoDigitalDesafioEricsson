@@ -12,7 +12,6 @@ AUTH_TOKEN = os.getenv(
     "EDGE_AUTH_TOKEN",
     os.getenv("AUTH_TOKEN", "GEMEO_DIGITAL_5G_ERICSSON_2026_9f3a27c1")
 )
-INCIDENT_ALERTS_ENABLED = os.getenv("EDGE_INCIDENT_ALERTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 REQUEST_HEADERS = {
     "Authorization": f"Bearer {AUTH_TOKEN}",
     "Content-Type": "application/json",
@@ -140,15 +139,7 @@ def start_inference():
                 "llm_prompt": f"Gerar report urgente: {last_event.upper()} detectado no {loc['setor']}."
             }
 
-            if INCIDENT_ALERTS_ENABLED:
-                # Dispara o alerta para o backend quando explicitamente habilitado.
-                try:
-                    response = requests.post(API_URL, json=payload, headers=REQUEST_HEADERS, timeout=0.5)
-                    print(f"🚨 Alerta enviado! Status: {response.status_code}")
-                except Exception as e:
-                    print(f"Erro ao conectar com backend: {e}")
-            else:
-                print(f"🟡 Incidente detectado localmente ({last_event}), mas envio HTTP desabilitado.")
+            print(f"🟡 Incidente detectado localmente ({last_event}), mas envio HTTP do edge esta permanentemente desabilitado.")
 
             # Reseta o contador apos o envio para evitar spam
             consecutive_detections = 0
