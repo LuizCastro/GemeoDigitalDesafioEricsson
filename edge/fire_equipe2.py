@@ -57,17 +57,51 @@ consecutive_detections = 0
 last_event = None
 
 
+def send_heartbeat(patrol_idx):
+    loc = PATROL_PATH[patrol_idx]
+    payload_normal = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "evento": "normal",
+        "confianca": 0.0,
+        "localizacao_otimizada": loc,
+        "llm_prompt": f"Patrulha de rotina no {loc['setor']}. Leituras térmicas normais."
+    }
+    try:
+        requests.post(API_URL, json=payload_normal, headers=REQUEST_HEADERS, timeout=0.5)
+        print(f"🔵 Heartbeat: {loc['setor']}")
+    except Exception as e:
+        print(f"Erro ao enviar heartbeat: {e}")
+
+
+def run_heartbeat_only():
+    print("Modo heartbeat-only ativo: sem modelo ou sem camera, sem inferencia local.")
+    patrol_idx = 0
+    while True:
+        send_heartbeat(patrol_idx)
+        patrol_idx = (patrol_idx + 1) % len(PATROL_PATH)
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
 # [cite: 37, 41]
 def start_inference():
     global consecutive_detections, last_event
 
     # 1. Carrega o modelo (Atividade 2.1)
     model_path = PRIMARY_MODEL_PATH if os.path.exists(PRIMARY_MODEL_PATH) else FALLBACK_MODEL_PATH
+    if not os.path.exists(model_path):
+        print("Nenhum modelo encontrado. Iniciando somente heartbeat de patrulha.")
+        run_heartbeat_only()
+        return
+
     print(f"Carregando modelo: {model_path}")
     model = YOLO(model_path)
 
     # 2. Inicia captura de video do robo (AMR) [cite: 39, 41]
     cap = cv2.VideoCapture(0)  # 0 para webcam ou caminho do video/stream
+    if not cap.isOpened():
+        print("Camera indisponivel. Iniciando somente heartbeat de patrulha.")
+        run_heartbeat_only()
+        return
 
     print("Iniciando monitoramento em tempo real...")
 
@@ -114,19 +148,7 @@ def start_inference():
         # Garante que o dashboard mostre o robô em movimento mesmo sem incidentes.
         now = time.time()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-            loc = PATROL_PATH[patrol_idx]
-            payload_normal = {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "evento": "normal",
-                "confianca": 0.0,
-                "localizacao_otimizada": loc,
-                "llm_prompt": f"Patrulha de rotina no {loc['setor']}. Leituras térmicas normais."
-            }
-            try:
-                requests.post(API_URL, json=payload_normal, headers=REQUEST_HEADERS, timeout=0.5)
-                print(f"🔵 Heartbeat: {loc['setor']}")
-            except Exception as e:
-                print(f"Erro ao enviar heartbeat: {e}")
+            send_heartbeat(patrol_idx)
             patrol_idx     = (patrol_idx + 1) % len(PATROL_PATH)
             last_heartbeat = now
 
