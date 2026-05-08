@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 from ultralytics import YOLO
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # --- CONFIGURAÇÕES E CONTRATO DE DADOS ---
 # [cite: 10, 40]
 API_URL = "http://localhost:3000/api/alert"  # URL da API do backend
@@ -20,7 +22,8 @@ REQUEST_HEADERS = {
 # [cite: 42]
 # Modelo treinado pelo Squad 1 (notebook: smoke-fire-detection-yolo-v12)
 # Execute: python edge/download_model.py  para baixar/gerar o best.pt
-MODEL_PATH = 'edge/models/best.pt'
+PRIMARY_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'best.pt')
+FALLBACK_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'yolov8n_fallback.pt')
 
 # Classes do modelo treinado (conforme validacao no Kaggle):
 #   {0: 'smoke', 1: 'fire'}   <- modelo Squad 1 (best.pt)
@@ -59,7 +62,9 @@ def start_inference():
     global consecutive_detections, last_event
 
     # 1. Carrega o modelo (Atividade 2.1)
-    model = YOLO(MODEL_PATH)
+    model_path = PRIMARY_MODEL_PATH if os.path.exists(PRIMARY_MODEL_PATH) else FALLBACK_MODEL_PATH
+    print(f"Carregando modelo: {model_path}")
+    model = YOLO(model_path)
 
     # 2. Inicia captura de video do robo (AMR) [cite: 39, 41]
     cap = cv2.VideoCapture(0)  # 0 para webcam ou caminho do video/stream
