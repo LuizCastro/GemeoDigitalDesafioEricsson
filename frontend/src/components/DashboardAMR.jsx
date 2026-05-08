@@ -531,7 +531,7 @@ export default function DigitalTwinDashboard() {
             };
 
             const hasIncomingIncident = ALERT_EVENTS.has(data.evento);
-            const shouldHoldCurrentIncident = incidentRequiresAck && !hasIncomingIncident;
+            const shouldHoldCurrentIncident = incidentRequiresAckRef.current && !hasIncomingIncident;
 
             if (!shouldHoldCurrentIncident) {
               setTelemetry(nextTelemetry);
