@@ -7,7 +7,8 @@
 // Faz broadcast via WebSocket para o Dashboard React
 // ==========================================
 
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
@@ -185,15 +186,14 @@ const MAX_HISTORY = 50;
 
 // ── Rotas HTTP ──
 
-// POST /alerta — recebe telemetria do Python (requer autorização)
-app.post('/alerta', authMiddleware, async (req, res) => {
-  const errors = validatePayload(req.body);
 
+// POST /api/alert — recebe incidentes do Python ou sistemas externos (requer autorização)
+app.post('/api/alert', authMiddleware, async (req, res) => {
+  const errors = validatePayload(req.body);
   if (errors.length > 0) {
     console.warn('❌ Payload inválido:', errors);
     return res.status(400).json({ error: 'Payload inválido', details: errors });
   }
-
   // Enriquece o payload
   const llmReport = await generateLLMReport(req.body);
   const enriched = {
@@ -203,17 +203,13 @@ app.post('/alerta', authMiddleware, async (req, res) => {
     llm_report: llmReport,
     type: 'alerta'
   };
-
   // Guarda no histórico
   alertHistory.unshift(enriched);
   if (alertHistory.length > MAX_HISTORY) alertHistory.pop();
-
   // Broadcast para todos os clientes WebSocket
   broadcast(enriched);
-
   const emoji = enriched.evento === 'fogo' ? '🔥' : enriched.evento === 'fumaca' ? '💨' : '✅';
   console.log(`${emoji} Alerta [${enriched.id_alerta}] — ${enriched.evento} (${(enriched.confianca * 100).toFixed(1)}%) — ${enriched.localizacao_otimizada?.setor}`);
-
   res.json({ status: 'ok', id_alerta: enriched.id_alerta });
 });
 
