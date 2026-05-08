@@ -378,6 +378,7 @@ export default function DigitalTwinDashboard() {
   const [systemState, setSystemState] = useState('NORMAL');
   const [isRobotStopped, setIsRobotStopped] = useState(false);
   const [incidentRequiresAck, setIncidentRequiresAck] = useState(false);
+  const incidentRequiresAckRef = useRef(false);
   const [stoppedLocation, setStoppedLocation] = useState(null);
   const [is3DMode, setIs3DMode] = useState(true);
   const [dataSource, setDataSource] = useState('mock'); // 'mock' | 'live'
@@ -485,7 +486,10 @@ export default function DigitalTwinDashboard() {
     const scheduleLiveTimeout = () => {
       clearTimeout(liveTelemetryTimerRef.current);
       liveTelemetryTimerRef.current = setTimeout(() => {
-        setDataSource('mock');
+        // Não troca para mock se houver incidente pendente de confirmação
+        if (!incidentRequiresAckRef.current) {
+          setDataSource('mock');
+        }
       }, 7000);
     };
 
@@ -559,6 +563,7 @@ export default function DigitalTwinDashboard() {
               setSystemState('ALERT');
               setIsRobotStopped(true);
               setIncidentRequiresAck(true);
+              incidentRequiresAckRef.current = true;
               if (currentRobotPositionRef.current) {
                 setStoppedLocation({
                   ...data.localizacao_otimizada,
@@ -568,7 +573,7 @@ export default function DigitalTwinDashboard() {
                   z3d: currentRobotPositionRef.current.z,
                 });
               }
-            } else if (data.evento === 'normal' && !incidentRequiresAck) {
+            } else if (data.evento === 'normal' && !incidentRequiresAckRef.current) {
               setSystemState('NORMAL');
             }
           } catch (e) {
@@ -758,6 +763,7 @@ export default function DigitalTwinDashboard() {
   const handleAcknowledgeIncident = () => {
     setIsRobotStopped(true);
     setIncidentRequiresAck(false);
+    incidentRequiresAckRef.current = false;
     updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
       ...alert,
       operatorDecision: 'confirmed',
@@ -774,6 +780,7 @@ export default function DigitalTwinDashboard() {
 
   const handleDismissIncident = () => {
     setIncidentRequiresAck(false);
+    incidentRequiresAckRef.current = false;
     setSystemState('NORMAL');
     updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
       ...alert,
