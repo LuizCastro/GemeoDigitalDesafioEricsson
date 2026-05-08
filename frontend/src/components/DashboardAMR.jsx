@@ -781,6 +781,8 @@ export default function DigitalTwinDashboard() {
   const handleDismissIncident = () => {
     setIncidentRequiresAck(false);
     incidentRequiresAckRef.current = false;
+    setIsRobotStopped(false);
+    setStoppedLocation(null);
     setSystemState('NORMAL');
     updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
       ...alert,
@@ -792,7 +794,7 @@ export default function DigitalTwinDashboard() {
       confianca: 0,
       llm_prompt: '',
     }));
-    alert('Ocorrência descartada. Use Iniciar Patrulha para retomar a operação.');
+    alert('Ocorrência descartada. O robô retomará a patrulha.');
   };
 
 
