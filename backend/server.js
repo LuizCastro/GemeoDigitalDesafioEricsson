@@ -187,8 +187,8 @@ const MAX_HISTORY = 50;
 // ── Rotas HTTP ──
 
 
-// POST /api/alert — recebe incidentes do Python ou sistemas externos (requer autorização)
-app.post('/api/alert', authMiddleware, async (req, res) => {
+// POST /api/alert e /alert — recebe incidentes do Python ou sistemas externos (requer autorização)
+app.post(['/api/alert', '/alert'], authMiddleware, async (req, res) => {
   const errors = validatePayload(req.body);
   if (errors.length > 0) {
     console.warn('❌ Payload inválido:', errors);
@@ -213,7 +213,7 @@ app.post('/api/alert', authMiddleware, async (req, res) => {
   res.json({ status: 'ok', id_alerta: enriched.id_alerta });
 });
 
-app.post('/api/llm-report', async (req, res) => {
+app.post(['/api/llm-report', '/llm-report'], async (req, res) => {
   const errors = validatePayload(req.body);
 
   if (errors.length > 0) {
