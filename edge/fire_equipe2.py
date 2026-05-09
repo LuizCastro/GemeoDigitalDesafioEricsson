@@ -4,6 +4,7 @@ import time
 import os
 import json
 import threading
+import numpy as np
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -13,11 +14,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MONITORING_STATE_PATH = os.path.join(BASE_DIR, 'monitoring_state.json')
 
 
+def _get_env_int(name, default):
+    value = os.getenv(name, '').strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"⚠️  Valor inválido para {name}: {value!r}. Usando {default}.")
+        return default
+
+
 def _utc_timestamp():
     return datetime.now(UTC).isoformat().replace('+00:00', 'Z')
 
 # ── MJPEG Stream Server (porta 3002) ──
 STREAM_PORT = 3002
+STREAM_MAX_FPS = max(1, _get_env_int('EDGE_STREAM_MAX_FPS', 12))
 _output_frame = None
 _frame_lock   = threading.Lock()
 
@@ -50,7 +63,7 @@ class _MJPEGHandler(BaseHTTPRequestHandler):
                             b'\r\n'
                         )
                         self.wfile.flush()
-                    time.sleep(0.01)  # ~100fps cap — aumenta fluidez do stream
+                    time.sleep(1 / STREAM_MAX_FPS)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
         else:
@@ -126,6 +139,11 @@ CONFIDENCE_THRESHOLD = 0.5  # [cite: 34]
 HEARTBEAT_INTERVAL   = 3.0  # Segundos entre updates de posição normal
 CLEAR_FRAMES_TO_REARM = 15  # Frames limpos para permitir um novo alerta
 PAUSE_POLL_INTERVAL = 0.5
+INFERENCE_WIDTH = max(320, _get_env_int('EDGE_INFERENCE_WIDTH', 512))
+STREAM_WIDTH = max(320, _get_env_int('EDGE_STREAM_WIDTH', 640))
+JPEG_QUALITY = min(95, max(30, _get_env_int('EDGE_JPEG_QUALITY', 70)))
+PUBLISH_MAX_FPS = max(1, _get_env_int('EDGE_PUBLISH_MAX_FPS', 8))
+PROCESS_EVERY_N_FRAMES = max(1, _get_env_int('EDGE_PROCESS_EVERY_N_FRAMES', 2))
 
 # Rota de patrulha do AMR — em produção substituir por GPS/odometria real
 # Ordem: A → B → D → C → A (loop)
@@ -160,7 +178,7 @@ def send_heartbeat(patrol_idx):
 
 
 def _publish_stream_frame(frame, paused=False):
-    stream_frame = cv2.resize(frame, (854, 480)) if frame.shape[1] > 854 else frame.copy()
+    stream_frame = cv2.resize(frame, (STREAM_WIDTH, int(frame.shape[0] * (STREAM_WIDTH / frame.shape[1])))) if frame.shape[1] > STREAM_WIDTH else frame.copy()
     if paused:
         cv2.putText(
             stream_frame,
@@ -171,17 +189,26 @@ def _publish_stream_frame(frame, paused=False):
             (0, 165, 255),
             2,
         )
-    ok, buf = cv2.imencode('.jpg', stream_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    ok, buf = cv2.imencode('.jpg', stream_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     if ok:
         with _frame_lock:
             global _output_frame
             _output_frame = buf.tobytes()
 
 
-def run_heartbeat_only():
-    print("Modo heartbeat-only ativo: sem modelo ou sem camera, sem inferencia local.")
+def _publish_status_frame(title, detail=''):
+    frame = np.zeros((360, STREAM_WIDTH, 3), dtype=np.uint8)
+    cv2.putText(frame, title, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2)
+    if detail:
+        cv2.putText(frame, detail[:70], (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    _publish_stream_frame(frame)
+
+
+def run_heartbeat_only(reason="sem modelo ou sem camera"):
+    print(f"Modo heartbeat-only ativo: {reason}, sem inferencia local.")
     patrol_idx = 0
     while True:
+        _publish_status_frame('MONITORAMENTO LIMITADO', reason)
         send_heartbeat(patrol_idx)
         patrol_idx = (patrol_idx + 1) % len(PATROL_PATH)
         time.sleep(HEARTBEAT_INTERVAL)
@@ -235,19 +262,20 @@ def start_inference():
 
     _write_monitoring_state('running', 'edge-startup')
 
+    # Inicia servidor MJPEG cedo para manter a rota do video acessivel
+    mjpeg_thread = threading.Thread(target=_start_mjpeg_server, daemon=True)
+    mjpeg_thread.start()
+    _publish_status_frame('INICIANDO EDGE', 'aguardando modelo/camera')
+
     # 1. Carrega o modelo (Atividade 2.1)
     model_path = PRIMARY_MODEL_PATH if os.path.exists(PRIMARY_MODEL_PATH) else FALLBACK_MODEL_PATH
     if not os.path.exists(model_path):
         print("Nenhum modelo encontrado. Iniciando somente heartbeat de patrulha.")
-        run_heartbeat_only()
+        run_heartbeat_only('modelo nao encontrado')
         return
 
     print(f"Carregando modelo: {model_path}")
     model = YOLO(model_path)
-
-    # Inicia servidor MJPEG em thread daemon (acessível em localhost:3002/video_feed)
-    mjpeg_thread = threading.Thread(target=_start_mjpeg_server, daemon=True)
-    mjpeg_thread.start()
 
     # 2. Inicia captura de video do robo (AMR) [cite: 39, 41]
     video_source = _resolve_video_source()
@@ -255,15 +283,23 @@ def start_inference():
     cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
         print(f"Fonte de vídeo '{video_source}' indisponível. Iniciando somente heartbeat de patrulha.")
-        run_heartbeat_only()
+        run_heartbeat_only(f'fonte de video indisponivel: {video_source}')
         return
 
     source_label = "arquivo" if is_file else ("RTSP" if isinstance(video_source, str) else "webcam")
     print(f"Iniciando monitoramento em tempo real... [fonte: {source_label} → {video_source}]")
+    print(
+        "Modo econômico ativo: "
+        f"infer_width={INFERENCE_WIDTH}, stream_width={STREAM_WIDTH}, "
+        f"jpeg={JPEG_QUALITY}, publish_fps={PUBLISH_MAX_FPS}, "
+        f"stream_fps={STREAM_MAX_FPS}, frame_skip={PROCESS_EVERY_N_FRAMES - 1}"
+    )
 
     patrol_idx     = 0
     # Inicializar last_heartbeat com o timestamp atual
     last_heartbeat = time.time()
+    last_publish_at = 0.0
+    frame_index = 0
 
     while cap.isOpened():
         success, frame = cap.read()
@@ -274,9 +310,24 @@ def start_inference():
                 continue
             break  # stream/webcam sem sinal → encerra
 
+        frame_index += 1
+
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            send_heartbeat(patrol_idx)
+            patrol_idx     = (patrol_idx + 1) % len(PATROL_PATH)
+            last_heartbeat = now
+
+        if now - last_publish_at >= (1 / PUBLISH_MAX_FPS):
+            _publish_stream_frame(frame)
+            last_publish_at = now
+
+        if frame_index % PROCESS_EVERY_N_FRAMES != 0:
+            continue
+
         # 3. Execucao da Inferencia [cite: 39]
         # Redimensiona para inferência (mais rápido no CPU)
-        infer_frame = cv2.resize(frame, (640, 360)) if frame.shape[1] > 640 else frame
+        infer_frame = cv2.resize(frame, (INFERENCE_WIDTH, int(frame.shape[0] * (INFERENCE_WIDTH / frame.shape[1])))) if frame.shape[1] > INFERENCE_WIDTH else frame
         results = model(infer_frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
 
         detected_this_frame = False
@@ -318,14 +369,6 @@ def start_inference():
                     clear_frames_since_alert = 0
                     print("🟢 Cena limpa novamente. Sistema rearmado para um novo alerta.")
 
-        # ── Heartbeat de patrulha — envia posição normal a cada HEARTBEAT_INTERVAL s ──
-        # Garante que o dashboard mostre o robô em movimento mesmo sem incidentes.
-        now = time.time()
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-            send_heartbeat(patrol_idx)
-            patrol_idx     = (patrol_idx + 1) % len(PATROL_PATH)
-            last_heartbeat = now
-
         # 5. Geracao de Telemetria de Alerta (Atividade 2.3) [cite: 45, 46]
         if not alert_latched and consecutive_detections >= CONFIRMATION_FRAMES:
             loc = PATROL_PATH[patrol_idx]  # Setor atual do AMR no momento do alerta
@@ -364,9 +407,9 @@ def start_inference():
             clear_frames_since_alert = 0
             consecutive_detections = 0
 
-        # Exibicao do processamento (Inference Visual) [cite: 47]
-        # Redimensiona para stream (economiza banda)
-        _publish_stream_frame(frame)
+        if now - last_publish_at >= (1 / PUBLISH_MAX_FPS):
+            _publish_stream_frame(frame)
+            last_publish_at = now
 
     cap.release()
 

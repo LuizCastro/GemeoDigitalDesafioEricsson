@@ -407,6 +407,7 @@ export default function DigitalTwinDashboard() {
   const [systemState, setSystemState] = useState('NORMAL');
   const [isRobotStopped, setIsRobotStopped] = useState(false);
   const [isMonitoringActive, setIsMonitoringActive] = useState(false);
+  const [isMonitoringPaused, setIsMonitoringPaused] = useState(false);
   const [incidentRequiresAck, setIncidentRequiresAck] = useState(false);
   const incidentRequiresAckRef = useRef(false);
   const [stoppedLocation, setStoppedLocation] = useState(null);
@@ -502,8 +503,10 @@ export default function DigitalTwinDashboard() {
         if (res.ok) {
           const data = await res.json();
           setBackendStatus('online');
-          const monitoringActive = Boolean(data.fire_monitoring_active) && !data.fire_monitoring_paused;
+          const monitoringActive = Boolean(data.fire_monitoring_active);
+          const monitoringPaused = Boolean(data.fire_monitoring_paused);
           setIsMonitoringActive(monitoringActive);
+          setIsMonitoringPaused(monitoringPaused);
           if (!monitoringActive) {
             setStreamActive(false);
           }
@@ -513,6 +516,7 @@ export default function DigitalTwinDashboard() {
       } catch {
         setBackendStatus('offline');
         setIsMonitoringActive(false);
+        setIsMonitoringPaused(false);
         setStreamActive(false);
       }
       timer = setTimeout(checkBackend, 10000);
@@ -783,6 +787,7 @@ export default function DigitalTwinDashboard() {
         setStoppedLocation(null);
         setSystemState('NORMAL'); // Garante que o robô volta a circular
         setIsMonitoringActive(true);
+        setIsMonitoringPaused(false);
         setStreamActive(false);
         setStreamKey((k) => k + 1); // força reload do stream
         showToast('Patrulha iniciada com sucesso!', 'success');
@@ -802,6 +807,7 @@ export default function DigitalTwinDashboard() {
       });
       if (response.ok) {
         setIsMonitoringActive(false);
+        setIsMonitoringPaused(false);
         setStreamActive(false);
         setIsRobotStopped(true);
         setStoppedLocation(currentRobotPositionRef.current ? {
@@ -846,6 +852,7 @@ export default function DigitalTwinDashboard() {
     setStoppedLocation(null);
     setSystemState('NORMAL');
     setIsMonitoringActive(true);
+    setIsMonitoringPaused(false);
     setStreamActive(false);
     setStreamKey((k) => k + 1);
     updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
@@ -937,9 +944,11 @@ export default function DigitalTwinDashboard() {
               AMR CAM 01
               {!isMonitoringActive
                 ? <span style={{ color: '#94a3b8', marginLeft: '0.5rem' }}>&#9679; PARADO</span>
-                : streamActive
-                  ? <span style={{ color: '#34d399', marginLeft: '0.5rem' }}>&#9679; LIVE</span>
-                  : <span style={{ color: '#f87171', marginLeft: '0.5rem' }}>&#9679; AGUARDANDO...</span>}
+                : isMonitoringPaused
+                  ? <span style={{ color: '#fbbf24', marginLeft: '0.5rem' }}>&#9679; PAUSADO</span>
+                  : streamActive
+                    ? <span style={{ color: '#34d399', marginLeft: '0.5rem' }}>&#9679; LIVE</span>
+                    : <span style={{ color: '#f87171', marginLeft: '0.5rem' }}>&#9679; AGUARDANDO...</span>}
             </span>
           </div>
 
@@ -972,10 +981,14 @@ export default function DigitalTwinDashboard() {
                 <div className={`video-bg ${isAlert ? 'alert' : 'normal'}`} />
                 <div className="video-overlay-content" style={{ zIndex: 2 }}>
                   <p className="status-value panel-video-title" style={{ color: isMonitoringActive ? '#fbbf24' : '#94a3b8' }}>
-                    {isMonitoringActive ? 'AGUARDANDO STREAM...' : 'SEM SINAL'}
+                    {isMonitoringActive
+                      ? (isMonitoringPaused ? 'VIDEO PAUSADO' : 'AGUARDANDO STREAM...')
+                      : 'SEM SINAL'}
                   </p>
                   <p className="status-label panel-video-subtitle">
-                    {isMonitoringActive ? 'Conectando ao serviço de vídeo...' : 'Clique em "Iniciar Patrulha" para ativar'}
+                    {isMonitoringActive
+                      ? (isMonitoringPaused ? 'Frame congelado aguardando liberação do operador.' : 'Conectando ao serviço de vídeo...')
+                      : 'Clique em "Iniciar Patrulha" para ativar'}
                   </p>
                 </div>
               </>

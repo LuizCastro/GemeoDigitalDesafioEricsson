@@ -14,7 +14,7 @@ const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
 const cors = require('cors');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 // ── Portas ──
 const HTTP_PORT = 3000;
@@ -24,6 +24,8 @@ const EDGE_DIR = path.join(PROJECT_ROOT, 'edge');
 const EDGE_SCRIPT_PATH = path.join(EDGE_DIR, 'fire_equipe2.py');
 const MONITORING_STATE_PATH = path.join(EDGE_DIR, 'monitoring_state.json');
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
+const EDGE_MANAGED_BY_SYSTEMD = process.env.EDGE_MANAGED_BY_SYSTEMD === 'true';
+const EDGE_SERVICE_NAME = process.env.EDGE_SERVICE_NAME || 'desafioericsson-edge.service';
 
 // ── Express (HTTP API) ──
 const app = express();
@@ -92,6 +94,45 @@ function writeMonitoringState(mode, reason) {
     reason,
     updated_at: new Date().toISOString(),
   }, null, 2));
+}
+
+function getSystemdErrorMessage(error, fallbackMessage) {
+  const stderr = error?.stderr?.toString().trim();
+  const stdout = error?.stdout?.toString().trim();
+  return stderr || stdout || error?.message || fallbackMessage;
+}
+
+function isEdgeServiceActive() {
+  if (!EDGE_MANAGED_BY_SYSTEMD) {
+    return Boolean(fireProcess);
+  }
+
+  try {
+    const status = execFileSync('systemctl', ['is-active', EDGE_SERVICE_NAME], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    return status === 'active';
+  } catch {
+    return false;
+  }
+}
+
+function resolveMonitoringStartupIssue() {
+  if (EDGE_MANAGED_BY_SYSTEMD) {
+    return null;
+  }
+
+  if (!fs.existsSync(EDGE_SCRIPT_PATH)) {
+    return `Script de monitoramento não encontrado em ${EDGE_SCRIPT_PATH}`;
+  }
+
+  const pythonBinLooksAbsolute = path.isAbsolute(PYTHON_BIN);
+  if (pythonBinLooksAbsolute && !fs.existsSync(PYTHON_BIN)) {
+    return `Executável Python não encontrado em ${PYTHON_BIN}`;
+  }
+
+  return null;
 }
 
 // ── Validação simples do payload ──
@@ -266,7 +307,7 @@ app.get(['/api/health', '/health'], (req, res) => {
   res.json({
     status: 'online',
     ws_clients: clientCount,
-    fire_monitoring_active: Boolean(fireProcess),
+    fire_monitoring_active: isEdgeServiceActive(),
     fire_monitoring_paused: monitoringState.mode === 'paused',
     alertas_total: alertHistory.length,
     uptime: process.uptime()
@@ -277,7 +318,7 @@ app.get(['/api/health', '/health'], (req, res) => {
 app.post(['/api/start-fire-monitoring', '/start-fire-monitoring'], (req, res) => {
   const monitoringState = readMonitoringState();
 
-  if (fireProcess) {
+  if (isEdgeServiceActive()) {
     if (monitoringState.mode === 'paused') {
       writeMonitoringState('running', 'manual-resume');
       return res.json({ status: 'Monitoramento retomado.', resumed: true });
@@ -286,11 +327,42 @@ app.post(['/api/start-fire-monitoring', '/start-fire-monitoring'], (req, res) =>
     return res.status(400).json({ error: 'O monitoramento já está em execução.' });
   }
 
+  const startupIssue = resolveMonitoringStartupIssue();
+  if (startupIssue) {
+    writeMonitoringState('stopped', `startup-error:${startupIssue}`);
+    return res.status(500).json({ error: startupIssue });
+  }
+
   writeMonitoringState('running', 'manual-start');
 
-  fireProcess = spawn(PYTHON_BIN, [EDGE_SCRIPT_PATH], {
-    stdio: 'inherit',
-    cwd: PROJECT_ROOT,
+  if (EDGE_MANAGED_BY_SYSTEMD) {
+    try {
+      execFileSync('systemctl', ['start', EDGE_SERVICE_NAME], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return res.json({ status: 'Monitoramento iniciado via systemd.', resumed: false });
+    } catch (error) {
+      const message = getSystemdErrorMessage(error, `Falha ao iniciar serviço ${EDGE_SERVICE_NAME}`);
+      writeMonitoringState('stopped', `systemd-start-error:${message}`);
+      return res.status(500).json({ error: message });
+    }
+  }
+
+  try {
+    fireProcess = spawn(PYTHON_BIN, [EDGE_SCRIPT_PATH], {
+      stdio: 'inherit',
+      cwd: PROJECT_ROOT,
+    });
+  } catch (error) {
+    writeMonitoringState('stopped', `spawn-throw:${error.message}`);
+    fireProcess = null;
+    return res.status(500).json({ error: `Falha ao iniciar monitoramento: ${error.message}` });
+  }
+
+  fireProcess.on('error', (error) => {
+    console.error('Erro ao iniciar fire_equipe2.py:', error);
+    writeMonitoringState('stopped', `spawn-error:${error.message}`);
+    fireProcess = null;
   });
 
   fireProcess.on('close', (code) => {
@@ -304,11 +376,24 @@ app.post(['/api/start-fire-monitoring', '/start-fire-monitoring'], (req, res) =>
 
 // POST /stop-fire-monitoring — Para o script de monitoramento
 app.post(['/api/stop-fire-monitoring', '/stop-fire-monitoring'], (req, res) => {
-  if (!fireProcess) {
+  if (!isEdgeServiceActive()) {
     return res.status(400).json({ error: 'Nenhum monitoramento está em execução.' });
   }
 
   writeMonitoringState('stopped', 'manual-stop');
+
+  if (EDGE_MANAGED_BY_SYSTEMD) {
+    try {
+      execFileSync('systemctl', ['stop', EDGE_SERVICE_NAME], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return res.json({ status: 'Monitoramento parado via systemd.' });
+    } catch (error) {
+      const message = getSystemdErrorMessage(error, `Falha ao parar serviço ${EDGE_SERVICE_NAME}`);
+      return res.status(500).json({ error: message });
+    }
+  }
+
   fireProcess.kill();
   fireProcess = null;
 
