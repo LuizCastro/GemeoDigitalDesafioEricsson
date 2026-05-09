@@ -34,3 +34,6 @@ Thumbs.db
 # Misc
 *.bak
 *.tmp
+
+# Runtime state
+edge/monitoring_state.json
