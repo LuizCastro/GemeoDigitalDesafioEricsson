@@ -8,6 +8,7 @@
 // ==========================================
 
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const http = require('http');
 const express = require('express');
@@ -18,6 +19,11 @@ const { spawn } = require('child_process');
 // ── Portas ──
 const HTTP_PORT = 3000;
 const WS_PORT = 3001;
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const EDGE_DIR = path.join(PROJECT_ROOT, 'edge');
+const EDGE_SCRIPT_PATH = path.join(EDGE_DIR, 'fire_equipe2.py');
+const MONITORING_STATE_PATH = path.join(EDGE_DIR, 'monitoring_state.json');
+const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
 
 // ── Express (HTTP API) ──
 const app = express();
@@ -70,6 +76,22 @@ function broadcast(payload) {
       client.send(message);
     }
   });
+}
+
+function readMonitoringState() {
+  try {
+    return JSON.parse(fs.readFileSync(MONITORING_STATE_PATH, 'utf8'));
+  } catch {
+    return { mode: 'stopped' };
+  }
+}
+
+function writeMonitoringState(mode, reason) {
+  fs.writeFileSync(MONITORING_STATE_PATH, JSON.stringify({
+    mode,
+    reason,
+    updated_at: new Date().toISOString(),
+  }, null, 2));
 }
 
 // ── Validação simples do payload ──
@@ -234,46 +256,77 @@ app.post(['/api/llm-report', '/llm-report'], async (req, res) => {
 });
 
 // GET /alertas — retorna histórico (para debug / UI)
-app.get('/alertas', (req, res) => {
+app.get(['/api/alertas', '/alertas'], (req, res) => {
   res.json(alertHistory);
 });
 
 // GET /health — health check
-app.get('/health', (req, res) => {
+app.get(['/api/health', '/health'], (req, res) => {
+  const monitoringState = readMonitoringState();
   res.json({
     status: 'online',
     ws_clients: clientCount,
+    fire_monitoring_active: Boolean(fireProcess),
+    fire_monitoring_paused: monitoringState.mode === 'paused',
     alertas_total: alertHistory.length,
     uptime: process.uptime()
   });
 });
 
 // POST /start-fire-monitoring — Inicia o script de monitoramento
-app.post('/start-fire-monitoring', (req, res) => {
+app.post(['/api/start-fire-monitoring', '/start-fire-monitoring'], (req, res) => {
+  const monitoringState = readMonitoringState();
+
   if (fireProcess) {
+    if (monitoringState.mode === 'paused') {
+      writeMonitoringState('running', 'manual-resume');
+      return res.json({ status: 'Monitoramento retomado.', resumed: true });
+    }
+
     return res.status(400).json({ error: 'O monitoramento já está em execução.' });
   }
 
-  fireProcess = spawn('python', ['edge/fire_equipe2.py'], { stdio: 'inherit' });
+  writeMonitoringState('running', 'manual-start');
+
+  fireProcess = spawn(PYTHON_BIN, [EDGE_SCRIPT_PATH], {
+    stdio: 'inherit',
+    cwd: PROJECT_ROOT,
+  });
 
   fireProcess.on('close', (code) => {
     console.log(`Processo fire_equipe2.py encerrado com código ${code}`);
+    writeMonitoringState('stopped', `process-exit:${code}`);
     fireProcess = null;
   });
 
-  res.json({ status: 'Monitoramento iniciado.' });
+  res.json({ status: 'Monitoramento iniciado.', resumed: false });
 });
 
 // POST /stop-fire-monitoring — Para o script de monitoramento
-app.post('/stop-fire-monitoring', (req, res) => {
+app.post(['/api/stop-fire-monitoring', '/stop-fire-monitoring'], (req, res) => {
   if (!fireProcess) {
     return res.status(400).json({ error: 'Nenhum monitoramento está em execução.' });
   }
 
+  writeMonitoringState('stopped', 'manual-stop');
   fireProcess.kill();
   fireProcess = null;
 
   res.json({ status: 'Monitoramento parado.' });
+});
+
+// ── Endpoint para Pausar/Retomar Monitoramento ──
+app.post('/monitoring', authMiddleware, (req, res) => {
+  const { mode } = req.body;
+  if (!['paused', 'running'].includes(mode)) {
+    return res.status(400).json({ error: 'Modo inválido. Use "paused" ou "running".' });
+  }
+
+  const reason = mode === 'paused' ? 'Pausado via API' : 'Retomado via API';
+  writeMonitoringState(mode, reason);
+  console.log(`🟢 Estado do monitoramento atualizado para: ${mode}`);
+
+  res.status(200).json({ message: `Monitoramento atualizado para: ${mode}` });
 });
 
 // ── Inicialização ──

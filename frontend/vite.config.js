@@ -17,6 +17,11 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/stream': {
+        target: 'http://127.0.0.1:3002',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/stream/, ''),
+      },
     },
   },
 });

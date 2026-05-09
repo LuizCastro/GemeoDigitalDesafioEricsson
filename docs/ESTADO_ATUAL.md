@@ -242,7 +242,7 @@ flowchart LR
 **Setores válidos:**
 - `"Setor A - Turbinas"`
 - `"Setor B - Geradores"`
-- `"Setor C - Painéis de Controlo"`
+- `"Setor C - Painéis de Controle"`
 - `"Setor D - Caldeiras Químicas"`
 
 ---

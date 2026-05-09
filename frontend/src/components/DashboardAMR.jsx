@@ -4,6 +4,28 @@ import { OrbitControls, useGLTF, Html, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import './DashboardAMR.css';
 
+// ── Toast Notification System ──
+function ToastContainer({ toasts, onDismiss }) {
+  return (
+    <div className="toast-container">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`toast toast-${t.type}`}
+          onClick={() => onDismiss(t.id)}
+        >
+          <span className="toast-icon">
+            {t.type === 'success' ? '✅' : t.type === 'error' ? '❌' : t.type === 'warning' ? '⚠️' : 'ℹ️'}
+          </span>
+          <span className="toast-msg">{t.message}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+let _toastId = 0;
+
 // Ícones para tipos de evento
 const EVENT_ICONS = {
   fogo: '🔥',
@@ -375,8 +397,16 @@ export default function DigitalTwinDashboard() {
   const [wsStatus, setWsStatus] = useState('connecting'); // 'connecting' | 'online' | 'offline'
   const [backendStatus, setBackendStatus] = useState('checking');
   const [newAlertAnim, setNewAlertAnim] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const showToast = (message, type = 'info') => {
+    const id = ++_toastId;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  };
+  const dismissToast = (id) => setToasts((prev) => prev.filter((t) => t.id !== id));
   const [systemState, setSystemState] = useState('NORMAL');
   const [isRobotStopped, setIsRobotStopped] = useState(false);
+  const [isMonitoringActive, setIsMonitoringActive] = useState(false);
   const [incidentRequiresAck, setIncidentRequiresAck] = useState(false);
   const incidentRequiresAckRef = useRef(false);
   const [stoppedLocation, setStoppedLocation] = useState(null);
@@ -388,6 +418,21 @@ export default function DigitalTwinDashboard() {
   // Consistência entre posição física do robô e localização declarada pela LLM
   // 0..1 onde 1 = totalmente consistente, < 0.6 = contradição
   const [locationConsistency, setLocationConsistency] = useState(null);
+  // Feed de vídeo MJPEG (localhost:3002/video_feed via proxy /stream)
+  const STREAM_URL = '/stream/video_feed';
+  const [streamActive, setStreamActive] = useState(false);
+  const [streamKey, setStreamKey] = useState(0);
+
+  // Auto-retry a cada 5s se o stream cair
+  useEffect(() => {
+    if (streamActive) return;
+    const t = setTimeout(() => {
+      setStreamKey((k) => k + 1);
+      setStreamActive(true);
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [streamActive]);
+
   const [telemetry, setTelemetry] = useState({
     id_alerta: 'N/A',
     timestamp: new Date().toISOString(),
@@ -454,10 +499,21 @@ export default function DigitalTwinDashboard() {
     async function checkBackend() {
       try {
         const res = await fetch(`${API_BASE_URL}/health`);
-        if (res.ok) setBackendStatus('online');
-        else setBackendStatus('offline');
+        if (res.ok) {
+          const data = await res.json();
+          setBackendStatus('online');
+          const monitoringActive = Boolean(data.fire_monitoring_active) && !data.fire_monitoring_paused;
+          setIsMonitoringActive(monitoringActive);
+          if (!monitoringActive) {
+            setStreamActive(false);
+          }
+        } else {
+          setBackendStatus('offline');
+        }
       } catch {
         setBackendStatus('offline');
+        setIsMonitoringActive(false);
+        setStreamActive(false);
       }
       timer = setTimeout(checkBackend, 10000);
     }
@@ -714,7 +770,7 @@ export default function DigitalTwinDashboard() {
 
   const startPatrol = async () => {
     if (incidentRequiresAck) {
-      alert('Reconheca o incidente antes de retomar a patrulha.');
+      showToast('Reconheça o incidente antes de retomar a patrulha.', 'warning');
       return;
     }
 
@@ -726,13 +782,16 @@ export default function DigitalTwinDashboard() {
         setIsRobotStopped(false);
         setStoppedLocation(null);
         setSystemState('NORMAL'); // Garante que o robô volta a circular
-        alert('Patrulha iniciada com sucesso!');
+        setIsMonitoringActive(true);
+        setStreamActive(false);
+        setStreamKey((k) => k + 1); // força reload do stream
+        showToast('Patrulha iniciada com sucesso!', 'success');
       } else {
-        alert('Erro ao iniciar a patrulha.');
+        showToast('Erro ao iniciar a patrulha.', 'error');
       }
     } catch (error) {
       console.error('Erro ao conectar com o backend:', error);
-      alert('Erro ao conectar com o backend.');
+      showToast('Erro ao conectar com o backend.', 'error');
     }
   };
 
@@ -742,6 +801,8 @@ export default function DigitalTwinDashboard() {
         method: 'POST',
       });
       if (response.ok) {
+        setIsMonitoringActive(false);
+        setStreamActive(false);
         setIsRobotStopped(true);
         setStoppedLocation(currentRobotPositionRef.current ? {
           ...telemetry.localizacao_otimizada,
@@ -749,14 +810,14 @@ export default function DigitalTwinDashboard() {
           y3d: currentRobotPositionRef.current.y,
           z3d: currentRobotPositionRef.current.z,
         } : telemetry.localizacao_otimizada);
-        alert('Patrulha parada com sucesso!');
+        showToast('Patrulha parada com sucesso!', 'success');
       } else {
         const err = await response.json().catch(() => ({}));
-        alert('Erro ao parar a patrulha.' + (err.error ? `\n${err.error}` : ''));
+        showToast('Erro ao parar a patrulha.' + (err.error ? ` ${err.error}` : ''), 'error');
       }
     } catch (error) {
       console.error('Erro ao conectar com o backend:', error);
-      alert('Erro ao conectar com o backend.');
+      showToast('Erro ao conectar com o backend.', 'error');
     }
   };
 
@@ -775,7 +836,7 @@ export default function DigitalTwinDashboard() {
       z3d: currentRobotPositionRef.current.z,
     } : telemetry.localizacao_otimizada);
     setSystemState(ALERT_EVENTS.has(telemetry.evento) ? 'ALERT' : 'NORMAL');
-    alert('Incidente reconhecido. O robô permanece parado até nova liberação.');
+    showToast('Incidente reconhecido. Robô parado até nova liberação.', 'warning');
   };
 
   const handleDismissIncident = () => {
@@ -784,6 +845,9 @@ export default function DigitalTwinDashboard() {
     setIsRobotStopped(false);
     setStoppedLocation(null);
     setSystemState('NORMAL');
+    setIsMonitoringActive(true);
+    setStreamActive(false);
+    setStreamKey((k) => k + 1);
     updateAlertLogEntry(telemetry.id_alerta, (alert) => ({
       ...alert,
       operatorDecision: 'dismissed',
@@ -794,15 +858,32 @@ export default function DigitalTwinDashboard() {
       confianca: 0,
       llm_prompt: '',
     }));
-    alert('Ocorrência descartada. O robô retomará a patrulha.');
+    showToast('Ocorrência descartada. Robô retomará a patrulha.', 'success');
   };
 
 
   useEffect(() => {
-    if (systemState === 'ALERT') {
-      const audio = new Audio('/alert-sound.mp3');
-      audio.play();
-    }
+    if (systemState !== 'ALERT') return;
+
+    // Tenta o ficheiro MP3; se não existir, gera beep via Web Audio API
+    const audio = new Audio('/alert-sound.mp3');
+    audio.play().catch(() => {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.setValueAtTime(660, ctx.currentTime + 0.15);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.30);
+        gain.gain.setValueAtTime(0.25, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.55);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.55);
+      } catch { /* contexto de áudio não suportado */ }
+    });
   }, [systemState]);
 
   const handlePositionUpdate = (currentPosition, projected) => {
@@ -852,24 +933,61 @@ export default function DigitalTwinDashboard() {
         <section className={`panel panel-video ${isAlert ? 'alert' : ''}`}>
           <div className="panel-header">
             <h2 className="panel-title">Feed da Camera</h2>
-            <span className="status-label">AMR CAM 01</span>
+            <span className="status-label">
+              AMR CAM 01
+              {!isMonitoringActive
+                ? <span style={{ color: '#94a3b8', marginLeft: '0.5rem' }}>&#9679; PARADO</span>
+                : streamActive
+                  ? <span style={{ color: '#34d399', marginLeft: '0.5rem' }}>&#9679; LIVE</span>
+                  : <span style={{ color: '#f87171', marginLeft: '0.5rem' }}>&#9679; AGUARDANDO...</span>}
+            </span>
           </div>
 
-          <div className="video-frame panel-video-frame">
-            <div className={`video-bg ${isAlert ? 'alert' : 'normal'}`} />
-            {isAlert && (
-              <div className="bounding-box">
+          <div className="video-frame panel-video-frame" style={{ position: 'relative', overflow: 'hidden' }}>
+            {/* Feed MJPEG real — só renderiza quando monitoramento está ativo */}
+            {isMonitoringActive && (
+              <img
+                key={streamKey}
+                src={STREAM_URL}
+                alt="AMR Camera Feed"
+                onLoad={() => setStreamActive(true)}
+                onError={() => {
+                  setStreamActive(false);
+                  setStreamKey((k) => k + 1); // retry automático
+                }}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  display: streamActive ? 'block' : 'none',
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                }}
+              />
+            )}
+            {/* Placeholder quando stream indisponível */}
+            {(!isMonitoringActive || !streamActive) && (
+              <>
+                <div className={`video-bg ${isAlert ? 'alert' : 'normal'}`} />
+                <div className="video-overlay-content" style={{ zIndex: 2 }}>
+                  <p className="status-value panel-video-title" style={{ color: isMonitoringActive ? '#fbbf24' : '#94a3b8' }}>
+                    {isMonitoringActive ? 'AGUARDANDO STREAM...' : 'SEM SINAL'}
+                  </p>
+                  <p className="status-label panel-video-subtitle">
+                    {isMonitoringActive ? 'Conectando ao serviço de vídeo...' : 'Clique em "Iniciar Patrulha" para ativar'}
+                  </p>
+                </div>
+              </>
+            )}
+            {/* Bounding box overlay (aparece sobre o stream quando em alerta) */}
+            {isAlert && streamActive && (
+              <div className="bounding-box" style={{ position: 'absolute', zIndex: 3 }}>
                 <div className="bb-label">
                   {telemetry.evento?.toUpperCase()} {(telemetry.confianca * 100).toFixed(0)}%
                 </div>
               </div>
             )}
-            <div className="video-overlay-content">
-              <p className="status-value panel-video-title">AMR CAM 01</p>
-              <p className="status-label panel-video-subtitle">
-                {isAlert ? 'Deteccao ativa na area monitorada' : 'Patrulha visual em andamento'}
-              </p>
-            </div>
           </div>
         </section>
 
@@ -999,6 +1117,7 @@ export default function DigitalTwinDashboard() {
           className="panel-history"
         />
       </main>
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

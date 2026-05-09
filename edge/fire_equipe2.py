@@ -2,10 +2,66 @@ import cv2
 import requests
 import time
 import os
-from datetime import datetime
+import json
+import threading
+from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from ultralytics import YOLO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MONITORING_STATE_PATH = os.path.join(BASE_DIR, 'monitoring_state.json')
+
+
+def _utc_timestamp():
+    return datetime.now(UTC).isoformat().replace('+00:00', 'Z')
+
+# ── MJPEG Stream Server (porta 3002) ──
+STREAM_PORT = 3002
+_output_frame = None
+_frame_lock   = threading.Lock()
+
+
+class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """MJPEG server que cria uma thread por conexão."""
+    daemon_threads = True
+
+
+class _MJPEGHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass  # silencia logs HTTP no terminal
+
+    def do_GET(self):
+        if self.path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            try:
+                while True:
+                    with _frame_lock:
+                        frame_bytes = _output_frame
+                    if frame_bytes is not None:
+                        self.wfile.write(
+                            b'--frame\r\n'
+                            b'Content-Type: image/jpeg\r\n\r\n' +
+                            frame_bytes +
+                            b'\r\n'
+                        )
+                        self.wfile.flush()
+                    time.sleep(0.01)  # ~100fps cap — aumenta fluidez do stream
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def _start_mjpeg_server():
+    server = _ThreadedHTTPServer(('0.0.0.0', STREAM_PORT), _MJPEGHandler)
+    print(f"\u2705 MJPEG stream disponível em: http://localhost:{STREAM_PORT}/video_feed")
+    server.serve_forever()
 
 # --- CONFIGURAÇÕES E CONTRATO DE DADOS ---
 # [cite: 10, 40]
@@ -25,6 +81,32 @@ REQUEST_HEADERS = {
 PRIMARY_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'best.pt')
 FALLBACK_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'yolov8n_fallback.pt')
 
+# ── FONTE DE VÍDEO ──────────────────────────────────────────────────────────
+# Prioridade de resolução (do mais específico para o mais genérico):
+#   1. Variável de ambiente VIDEO_SOURCE
+#   2. Arquivo de vídeo local  edge/sample.mp4  (coloque qualquer vídeo aqui)
+#   3. Stream RTSP              rtsp://IP_AMR/stream
+#   4. Webcam padrão            0
+#
+# Para trocar sem editar código:
+#   set VIDEO_SOURCE=0                          (webcam)
+#   set VIDEO_SOURCE=edge\meu_video.mp4         (arquivo)
+#   set VIDEO_SOURCE=rtsp://192.168.1.10/stream (AMR real)
+# ────────────────────────────────────────────────────────────────────────────
+_SAMPLE_VIDEO = os.path.join(BASE_DIR, 'sample.mp4')
+
+def _resolve_video_source() -> object:
+    """Retorna o argumento correto para cv2.VideoCapture."""
+    env_src = os.getenv('VIDEO_SOURCE', '').strip()
+    if env_src:
+        # Tenta converter para int (índice de câmara) se for número
+        return int(env_src) if env_src.isdigit() else env_src
+    if os.path.exists(_SAMPLE_VIDEO):
+        print(f"📹 Usando vídeo de simulação: {_SAMPLE_VIDEO}")
+        return _SAMPLE_VIDEO
+    print("📷 VIDEO_SOURCE não definido e sample.mp4 não encontrado — usando webcam (índice 0)")
+    return 0
+
 # Classes do modelo treinado (conforme validacao no Kaggle):
 #   {0: 'smoke', 1: 'fire'}   <- modelo Squad 1 (best.pt)
 # Se usar COCO fallback (yolov8n_fallback.pt), nenhum label abaixo sera encontrado
@@ -42,6 +124,8 @@ LABEL_TO_EVENTO = {
 CONFIRMATION_FRAMES  = 5    # Frames consecutivos para validar o alerta
 CONFIDENCE_THRESHOLD = 0.5  # [cite: 34]
 HEARTBEAT_INTERVAL   = 3.0  # Segundos entre updates de posição normal
+CLEAR_FRAMES_TO_REARM = 15  # Frames limpos para permitir um novo alerta
+PAUSE_POLL_INTERVAL = 0.5
 
 # Rota de patrulha do AMR — em produção substituir por GPS/odometria real
 # Ordem: A → B → D → C → A (loop)
@@ -49,18 +133,20 @@ PATROL_PATH = [
     {"setor": "Setor A - Turbinas",            "x": 150, "y": 125},
     {"setor": "Setor B - Geradores",           "x": 360, "y": 125},
     {"setor": "Setor D - Caldeiras Químicas",  "x": 360, "y": 285},
-    {"setor": "Setor C - Painéis de Controlo", "x": 150, "y": 285},
+    {"setor": "Setor C - Painéis de Controle", "x": 150, "y": 285},
 ]
 
 # --- ESTADO DO SISTEMA ---
 consecutive_detections = 0
 last_event = None
+alert_latched = False
+clear_frames_since_alert = 0
 
 
 def send_heartbeat(patrol_idx):
     loc = PATROL_PATH[patrol_idx]
     payload_normal = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": _utc_timestamp(),
         "evento": "normal",
         "confianca": 0.0,
         "localizacao_otimizada": loc,
@@ -73,6 +159,25 @@ def send_heartbeat(patrol_idx):
         print(f"Erro ao enviar heartbeat: {e}")
 
 
+def _publish_stream_frame(frame, paused=False):
+    stream_frame = cv2.resize(frame, (854, 480)) if frame.shape[1] > 854 else frame.copy()
+    if paused:
+        cv2.putText(
+            stream_frame,
+            'MONITORAMENTO PAUSADO',
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 165, 255),
+            2,
+        )
+    ok, buf = cv2.imencode('.jpg', stream_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if ok:
+        with _frame_lock:
+            global _output_frame
+            _output_frame = buf.tobytes()
+
+
 def run_heartbeat_only():
     print("Modo heartbeat-only ativo: sem modelo ou sem camera, sem inferencia local.")
     patrol_idx = 0
@@ -82,9 +187,53 @@ def run_heartbeat_only():
         time.sleep(HEARTBEAT_INTERVAL)
 
 
+def _write_monitoring_state(mode, reason):
+    with open(MONITORING_STATE_PATH, 'w', encoding='utf-8') as file_handle:
+        json.dump({
+            'mode': mode,
+            'reason': reason,
+            'updated_at': _utc_timestamp(),
+        }, file_handle)
+
+
+def _read_monitoring_mode():
+    try:
+        with open(MONITORING_STATE_PATH, 'r', encoding='utf-8') as file_handle:
+            return json.load(file_handle).get('mode', 'running')
+    except Exception:
+        return 'running'
+
+
+def _pause_until_resumed():
+    """Pausa o processamento até que o estado seja alterado para 'running'."""
+    try:
+        while True:
+            try:
+                with open(MONITORING_STATE_PATH, 'r') as f:
+                    state = json.load(f)
+                if state.get('mode') == 'running':
+                    print("🟢 Monitoramento retomado.")
+                    break
+            except Exception as e:
+                print(f"⚠️  Erro ao ler estado de monitoramento: {e}")
+            print("⏸️  Sistema pausado. Aguardando retomada...")
+            time.sleep(1)  # Aguarda 1 segundo antes de verificar novamente
+    except KeyboardInterrupt:
+        print("🔴 Interrupção detectada. Encerrando o sistema...")
+        raise
+    return time.time()  # retorna timestamp para reiniciar o heartbeat corretamente
+
+def _handle_alert():
+    """Lógica para lidar com alertas e pausar o sistema."""
+    print("⏸️  Alerta emitido. Pausando monitoramento...")
+    _pause_until_resumed()
+
+
 # [cite: 37, 41]
 def start_inference():
-    global consecutive_detections, last_event
+    global consecutive_detections, last_event, alert_latched, clear_frames_since_alert, _output_frame
+
+    _write_monitoring_state('running', 'edge-startup')
 
     # 1. Carrega o modelo (Atividade 2.1)
     model_path = PRIMARY_MODEL_PATH if os.path.exists(PRIMARY_MODEL_PATH) else FALLBACK_MODEL_PATH
@@ -96,25 +245,39 @@ def start_inference():
     print(f"Carregando modelo: {model_path}")
     model = YOLO(model_path)
 
+    # Inicia servidor MJPEG em thread daemon (acessível em localhost:3002/video_feed)
+    mjpeg_thread = threading.Thread(target=_start_mjpeg_server, daemon=True)
+    mjpeg_thread.start()
+
     # 2. Inicia captura de video do robo (AMR) [cite: 39, 41]
-    cap = cv2.VideoCapture(0)  # 0 para webcam ou caminho do video/stream
+    video_source = _resolve_video_source()
+    is_file = isinstance(video_source, str) and os.path.isfile(video_source)
+    cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
-        print("Camera indisponivel. Iniciando somente heartbeat de patrulha.")
+        print(f"Fonte de vídeo '{video_source}' indisponível. Iniciando somente heartbeat de patrulha.")
         run_heartbeat_only()
         return
 
-    print("Iniciando monitoramento em tempo real...")
+    source_label = "arquivo" if is_file else ("RTSP" if isinstance(video_source, str) else "webcam")
+    print(f"Iniciando monitoramento em tempo real... [fonte: {source_label} → {video_source}]")
 
     patrol_idx     = 0
+    # Inicializar last_heartbeat com o timestamp atual
     last_heartbeat = time.time()
 
     while cap.isOpened():
         success, frame = cap.read()
         if not success:
-            break
+            if is_file:
+                # Loop no vídeo: volta ao início quando termina
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            break  # stream/webcam sem sinal → encerra
 
         # 3. Execucao da Inferencia [cite: 39]
-        results = model(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
+        # Redimensiona para inferência (mais rápido no CPU)
+        infer_frame = cv2.resize(frame, (640, 360)) if frame.shape[1] > 640 else frame
+        results = model(infer_frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
 
         detected_this_frame = False
         current_conf = 0
@@ -131,8 +294,12 @@ def start_inference():
                     last_event   = LABEL_TO_EVENTO.get(label, label)
                     current_conf = float(box.conf[0])
 
-                    # Desenha na tela para o operador local [cite: 47]
+                    # Desenha na tela (escala coords do infer_frame para o frame original)
+                    scale_x = frame.shape[1] / infer_frame.shape[1]
+                    scale_y = frame.shape[0] / infer_frame.shape[0]
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    x1, x2 = int(x1*scale_x), int(x2*scale_x)
+                    y1, y2 = int(y1*scale_y), int(y2*scale_y)
                     color = (0, 0, 255) if last_event == "fogo" else (128, 128, 128)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(frame, f"{last_event} {current_conf:.2f}", (x1, y1 - 10),
@@ -141,8 +308,15 @@ def start_inference():
         # 4. Filtro Temporal (Atividade 2.2) [cite: 43, 44]
         if detected_this_frame:
             consecutive_detections += 1
+            clear_frames_since_alert = 0
         else:
             consecutive_detections = 0  # Reseta se houver um frame limpo
+            if alert_latched:
+                clear_frames_since_alert += 1
+                if clear_frames_since_alert >= CLEAR_FRAMES_TO_REARM:
+                    alert_latched = False
+                    clear_frames_since_alert = 0
+                    print("🟢 Cena limpa novamente. Sistema rearmado para um novo alerta.")
 
         # ── Heartbeat de patrulha — envia posição normal a cada HEARTBEAT_INTERVAL s ──
         # Garante que o dashboard mostre o robô em movimento mesmo sem incidentes.
@@ -153,32 +327,48 @@ def start_inference():
             last_heartbeat = now
 
         # 5. Geracao de Telemetria de Alerta (Atividade 2.3) [cite: 45, 46]
-        if consecutive_detections >= CONFIRMATION_FRAMES:
+        if not alert_latched and consecutive_detections >= CONFIRMATION_FRAMES:
             loc = PATROL_PATH[patrol_idx]  # Setor atual do AMR no momento do alerta
 
             # Estrutura exata do Contrato JSON [cite: 15-20]
             payload = {
                 "id_alerta": f"ALRT-{int(time.time()) % 10000}",
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": _utc_timestamp(),
                 "evento": last_event,
                 "confianca": round(current_conf, 2),
                 "localizacao_otimizada": loc,
                 "llm_prompt": f"Gerar report urgente: {last_event.upper()} detectado no {loc['setor']}."
             }
 
-            print(f"🟡 Incidente detectado localmente ({last_event}), mas envio HTTP do edge esta permanentemente desabilitado.")
+            try:
+                response = requests.post(
+                    API_URL,
+                    json=payload,
+                    headers=REQUEST_HEADERS,
+                    timeout=2.0
+                )
+                emoji = "🔥" if last_event == "fogo" else "💨"
+                print(f"{emoji} Alerta enviado [{payload['id_alerta']}] — {last_event} ({payload['confianca']*100:.0f}%) — {loc['setor']} → HTTP {response.status_code}")
+            except Exception as e:
+                print(f"⚠️  Erro ao enviar alerta: {e}")
 
-            # Reseta o contador apos o envio para evitar spam
+            alert_latched = True
+            clear_frames_since_alert = 0
+
+            # Reseta o contador apos o envio e mantem o latch ativo para evitar spam
+            consecutive_detections = 0
+            _publish_stream_frame(frame, paused=True)
+            _write_monitoring_state('paused', f'alert:{last_event}')
+            last_heartbeat = _pause_until_resumed()
+            alert_latched = False
+            clear_frames_since_alert = 0
             consecutive_detections = 0
 
         # Exibicao do processamento (Inference Visual) [cite: 47]
-        cv2.imshow("AMR Vision - Fire Detection", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Redimensiona para stream (economiza banda)
+        _publish_stream_frame(frame)
 
     cap.release()
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     start_inference()
