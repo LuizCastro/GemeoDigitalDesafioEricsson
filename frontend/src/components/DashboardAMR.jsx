@@ -788,7 +788,8 @@ export default function DigitalTwinDashboard() {
         setSystemState('NORMAL'); // Garante que o robô volta a circular
         setIsMonitoringActive(true);
         setIsMonitoringPaused(false);
-        setStreamActive(false);
+        setIsMonitoringActive(true);
+        setStreamActive(true);
         setStreamKey((k) => k + 1); // força reload do stream
         showToast('Patrulha iniciada com sucesso!', 'success');
       } else {
