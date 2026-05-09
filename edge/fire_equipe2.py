@@ -44,13 +44,24 @@ class _MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # silencia logs HTTP no terminal
 
+    def _send_stream_headers(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+
+    def do_HEAD(self):
+        if self.path == '/video_feed':
+            self._send_stream_headers()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         if self.path == '/video_feed':
-            self.send_response(200)
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
+            self._send_stream_headers()
             try:
                 while True:
                     with _frame_lock:
