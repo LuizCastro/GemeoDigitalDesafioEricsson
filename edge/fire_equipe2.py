@@ -146,7 +146,7 @@ LABEL_TO_EVENTO = {
 }
 
 CONFIRMATION_FRAMES  = 5    # Frames consecutivos para validar o alerta
-CONFIDENCE_THRESHOLD = 0.5  # [cite: 34]
+CONFIDENCE_THRESHOLD = 0.25  # Ajustado: modelo detecta fire/smoke com conf entre 0.1-0.5
 HEARTBEAT_INTERVAL   = 3.0  # Segundos entre updates de posição normal
 CLEAR_FRAMES_TO_REARM = 15  # Frames limpos para permitir um novo alerta
 PAUSE_POLL_INTERVAL = 0.5
